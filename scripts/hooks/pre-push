@@ -1,0 +1,5 @@
+#!/bin/sh
+# Pre-push gate: run the same checks CI runs before code leaves the machine.
+# Enable once per clone:  git config core.hooksPath scripts/hooks
+# Bypass in a pinch:       git push --no-verify
+exec sh scripts/check.sh
