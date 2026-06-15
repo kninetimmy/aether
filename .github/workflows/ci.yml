@@ -49,3 +49,18 @@ jobs:
         run: mypy
       - name: Pytest
         run: pytest
+
+  ci-success:
+    # Single stable status check for branch protection: it stays "ci-success"
+    # even if the test matrix gains or drops Python versions, so protection
+    # rules never go stale. Fails if any matrix leg failed.
+    name: ci-success
+    if: always()
+    needs: [test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all test jobs to pass
+        run: |
+          result="${{ needs.test.result }}"
+          echo "test matrix result: $result"
+          test "$result" = "success"
