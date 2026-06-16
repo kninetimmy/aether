@@ -34,7 +34,7 @@ from typing import Any, Literal
 import aiomqtt
 
 from aether.adapters.readsb import SOURCE, parse_aircraft_snapshot
-from aether.bus.client import Bus, connect
+from aether.bus.client import connect
 from aether.config import Settings
 from aether.schema.records import Record, SourceStatusRecord
 
@@ -284,30 +284,31 @@ async def run_local_adsb(
 
     Waits for the subscriber to be live (avoids a startup race), then publishes
     the :func:`local_adsb_records` stream. A broker drop triggers a jittered
-    exponential reconnect rather than crashing the lifespan; the generator is
-    resumed across reconnects so source state (throttle, counters) is preserved.
+    exponential reconnect rather than crashing the lifespan.
+
+    A fresh stream is created per connection: an ``MqttError`` raised mid-publish
+    unwinds the ``async for`` and (PEP 525) closes the generator, so the previous
+    one cannot be resumed — reusing it would silently end the adapter after the
+    first reconnect. The long-lived ``source`` is kept outside the loop so its
+    conditional-request cache (ETag/Last-Modified) survives a reconnect; only the
+    per-aircraft throttle and counters reset, which mirrors the demo publisher.
     """
     await ready.wait()
     source = ReadsbSource(cfg.local_adsb_source, timeout_s=cfg.local_adsb_timeout_s)
-    stream = local_adsb_records(
-        source,
-        poll_s=poll_s if poll_s is not None else cfg.local_adsb_poll_s,
-        throttle_s=throttle_s if throttle_s is not None else cfg.local_adsb_throttle_s,
-    )
+    resolved_poll = poll_s if poll_s is not None else cfg.local_adsb_poll_s
+    resolved_throttle = throttle_s if throttle_s is not None else cfg.local_adsb_throttle_s
     log.info("local ADS-B adapter -> %s", source.location)
     backoff = INITIAL_BACKOFF_S
     while True:
         try:
             async with connect(cfg, identifier="aether-local-adsb") as bus:
                 backoff = INITIAL_BACKOFF_S  # reset once connected
-                await _pump(bus, stream)
+                async for record in local_adsb_records(
+                    source, poll_s=resolved_poll, throttle_s=resolved_throttle
+                ):
+                    await bus.publish_record(record)
                 return  # generator exhausted (only on cancellation in practice)
         except aiomqtt.MqttError as exc:
             sleep_for, backoff = _backoff(backoff)
             log.warning("local ADS-B lost broker (%s); reconnecting in %.1fs", exc, sleep_for)
             await asyncio.sleep(sleep_for)
-
-
-async def _pump(bus: Bus, stream: AsyncIterator[Record]) -> None:
-    async for record in stream:
-        await bus.publish_record(record)

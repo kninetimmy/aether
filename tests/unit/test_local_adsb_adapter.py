@@ -8,6 +8,7 @@ a real (fast) event loop via ``asyncio.run``.
 """
 
 import asyncio
+import contextlib
 import json
 import urllib.error
 from collections.abc import AsyncIterator
@@ -15,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import aiomqtt
 import pytest
 
 from aether.adapters import local_adsb
@@ -26,8 +28,10 @@ from aether.adapters.local_adsb import (
     _backoff,
     _loads_snapshot,
     local_adsb_records,
+    run_local_adsb,
 )
 from aether.adapters.readsb_fake_feeder import fake_snapshot
+from aether.config import Settings
 from aether.schema.records import Record
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "readsb" / "aircraft.json"
@@ -178,3 +182,73 @@ def test_generator_marks_degraded_on_failed_poll() -> None:
     assert items[0].status == "starting"  # type: ignore[union-attr]
     assert items[1].status == "degraded"  # type: ignore[union-attr]
     assert items[1].error_code == "OSError"  # type: ignore[union-attr]
+
+
+# --- run_local_adsb reconnect (PRD §17.1, §37) --------------------------------
+
+
+class _FakeBus:
+    """Publishes into a sink, optionally raising ``MqttError`` after N publishes."""
+
+    def __init__(self, fail_after: int | None, sink: list[Any]) -> None:
+        self._fail_after = fail_after
+        self._sink = sink
+        self.count = 0
+
+    async def publish_record(self, record: Any) -> None:
+        self.count += 1
+        if self._fail_after is not None and self.count > self._fail_after:
+            raise aiomqtt.MqttError("broker dropped")
+        self._sink.append(record)
+
+
+def test_run_local_adsb_keeps_publishing_after_broker_drop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mid-publish broker drop must not silently end the adapter.
+
+    The first connection fails after one publish; the runner must reconnect and
+    keep publishing on a *fresh* stream. The buggy version reused the closed
+    generator and stopped for good, so the second connection would never publish
+    and this test would time out.
+    """
+    monkeypatch.setattr(local_adsb, "_backoff", lambda _delay: (0.0, 0.0))
+
+    async def scenario() -> dict[str, int]:
+        state = {"connects": 0, "second_conn_publishes": 0}
+        second_published = asyncio.Event()
+        second_sink: list[Any] = []
+
+        @contextlib.asynccontextmanager
+        async def fake_connect(_cfg: Settings, *, identifier: str | None = None) -> Any:
+            state["connects"] += 1
+            if state["connects"] == 1:
+                yield _FakeBus(fail_after=1, sink=[])  # drops after the first publish
+            else:
+
+                class _CountingBus(_FakeBus):
+                    async def publish_record(self, record: Any) -> None:
+                        await super().publish_record(record)
+                        state["second_conn_publishes"] += 1
+                        second_published.set()
+
+                yield _CountingBus(fail_after=None, sink=second_sink)
+
+        monkeypatch.setattr(local_adsb, "connect", fake_connect)
+        cfg = Settings(
+            local_adsb_source=str(FIXTURE), local_adsb_poll_s=0.0, local_adsb_throttle_s=0.0
+        )
+        ready = asyncio.Event()
+        ready.set()
+        task = asyncio.create_task(run_local_adsb(cfg, ready))
+        try:
+            await asyncio.wait_for(second_published.wait(), timeout=5.0)
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        return state
+
+    state = asyncio.run(scenario())
+    assert state["connects"] >= 2, "runner must reconnect after a broker drop"
+    assert state["second_conn_publishes"] >= 1, "runner must resume publishing after reconnect"
