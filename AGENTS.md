@@ -137,18 +137,20 @@ supersedes the v1 `Entity`/`Event`. Treat the v1 skeleton as the migration start
 
 ## 6. Run & verify (no hardware — the gate for every change)
 
-Current v1 skeleton:
+Current COP core (M1) — the in-process demo source publishes mixed schema-v2 records onto the bus, so the
+full path renders with no radios:
 
 ```bash
 python -m venv .venv && source .venv/bin/activate     # Windows: .venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
-docker compose up -d                                          # broker
-python tools/fake_readsb.py                                   # fake ADS-B :30003
-uvicorn aether.backend.main:app --host 127.0.0.1 --port 8000  # backend
-python -m aether.adapters.run adsb -v                         # adapter
-curl -s localhost:8000/api/state | python -m json.tool        # expect aircraft, SI units
-pytest -q                                                     # expect green
+docker compose up -d                                          # local MQTT broker
+uvicorn aether.backend.main:app --host 127.0.0.1 --port 8000  # backend + in-process demo source
+curl -s localhost:8000/api/state | python -m json.tool        # expect mixed records (track/feature/event/alert/status)
+cd frontend && npm install && npm run dev                     # MapLibre COP shell on /ws/v2 (separate terminal)
+scripts/check.sh                                              # ruff + mypy (strict) + pytest — expect green
 ```
+
+A real deployment sets `AETHER_DEMO_SOURCE=0` and runs source adapters instead of the in-process demo.
 
 As the COP lands, every source ships a fake/replay feeder and the same rule holds: **simulated data must
 exercise the full path (adapter → bus → state → websocket → UI) with tests green, before hardware or live

@@ -1,0 +1,124 @@
+# aether
+
+A private, local-first, browser-based **common operating picture (COP)** for a Raspberry Pi 5 home
+station. Local SDR receivers are the trusted first-party sources; on top of them, aether fuses open
+Internet feeds into one time-aware map where every record carries **provenance** — so the operator always
+knows what their own radios received versus what only an Internet feed reported.
+
+aether is a hobbyist situational-awareness tool. It is **not** an authoritative aviation, maritime,
+emergency-management, orbital, weather, or navigation product, and it makes no operational decisions.
+
+> **Authority:** [`PRD.md`](PRD.md) is the product + architecture specification. [`CLAUDE.md`](CLAUDE.md) /
+> [`AGENTS.md`](AGENTS.md) is the lean operating guide for AI coding agents. When anything conflicts, the
+> PRD wins; code is ground truth for current state.
+
+---
+
+## What it does
+
+aether runs continuously on a Pi 5 with two dedicated SDR receivers and fuses local radio observations with
+open Internet data into one coherent, dark, high-density map. Planned sources include:
+
+- **Local SDR (receive-only RF):** 1090 MHz ADS-B/Mode-S via `readsb`; 144.39 MHz APRS via Dire Wolf.
+- **Network feeds:** wider-area ADS-B from an open provider, APRS-IS, AIS vessels, SondeHub radiosondes,
+  lightning, NASA FIRMS active-fire detections, USGS earthquakes, FAA TFR/NOTAM, and CelesTrak orbital data
+  with locally propagated overhead-object positions and pass predictions.
+- **Operator layers:** tracks of interest, geofences, filters, alerts, history, and replay.
+
+The default area of interest is a **500-nautical-mile radius** around the configured home station,
+operator-adjustable. Local and Internet observations of the same identity **fuse into one** record via
+strict identity keys, and the UI can always collapse to local-only.
+
+### Receive-only, private by default
+
+The APRS station operates as a **receive-only RF iGate**: valid RF packets may be gated *to* APRS-IS, but
+the system never transmits, beacons, digipeats, acks over RF, or creates an Internet-to-RF path. The app and
+broker bind loopback; remote access is via **Tailscale Serve only, never Funnel**. The repo carries no
+secrets, callsign, or station coordinates — each operator supplies their own config.
+
+---
+
+## Status
+
+Early **Milestone 1 (COP core)** — in-memory live state, no persistence yet. Working today:
+
+- **Schema v2** — a Pydantic v2 discriminated record union (track / geo-feature / event / alert /
+  source-status) with provenance, correlation keys, and observed/received/published timestamps.
+- **MQTT bus** — records flow over `aether/v2/...` topics (Mosquitto).
+- **FastAPI backend** — in-memory live state at `/api/state`, plus a sequence-numbered websocket `/ws/v2`
+  (snapshot then deltas, with gap detection and resync).
+- **MapLibre frontend** — React + Vite + TypeScript COP shell that renders the full record union live,
+  through a centralized presentation registry; map, layer control, source-health, track list, and
+  event/alert panels.
+- **No-hardware demo source** — a simulated mixed-record publisher that exercises the full path
+  (adapter → bus → state → websocket → UI) so the COP renders without any radios.
+
+See the milestone roadmap (M0–M7) in [`CLAUDE.md`](CLAUDE.md) §4 and the exit criteria in `PRD.md` §32–33.
+
+---
+
+## Run it (no hardware required)
+
+**Backend** — needs Python 3.11+ and Docker (for the Mosquitto broker):
+
+```bash
+python -m venv .venv && source .venv/bin/activate     # Windows: .venv\Scripts\Activate.ps1
+pip install -e ".[dev]"
+docker compose up -d                                          # local MQTT broker
+uvicorn aether.backend.main:app --host 127.0.0.1 --port 8000  # backend + in-process demo source
+```
+
+Then check the state and stream:
+
+```bash
+curl -s localhost:8000/api/state | python -m json.tool       # mixed records from the demo source
+```
+
+A real deployment sets `AETHER_DEMO_SOURCE=0` and runs source adapters instead of the in-process demo.
+
+**Frontend** — needs Node:
+
+```bash
+cd frontend
+npm install
+npm run dev                                                   # Vite dev server, connects to /ws/v2
+```
+
+---
+
+## Verify
+
+The same gate CI runs, locally:
+
+```bash
+scripts/check.sh        # ruff lint + format check, mypy (strict), pytest
+cd frontend && npm test # vitest
+```
+
+Every change is done only when its tests pass **and** the no-hardware path still renders.
+
+---
+
+## Stack
+
+Python 3.11+ async · Pydantic v2 · Mosquitto (local MQTT) · FastAPI (REST + WebSocket) · React + Vite +
+TypeScript · MapLibre GL JS · Tailscale Serve for private access.
+
+## Layout
+
+```
+src/aether/
+  schema/      schema v2 record union, geometry, provenance, validation
+  bus/         MQTT client, topics, no-hardware demo publisher
+  state/       in-memory live state + sequence numbering
+  backend/     FastAPI app, websocket hub, wire protocol
+frontend/      React + Vite + TS COP shell (MapLibre)
+deploy/        Mosquitto broker config
+scripts/       local check parity + git hooks
+tests/         parser/schema/path tests
+```
+
+## License
+
+[GPL-3.0](LICENSE). aether is a private, single-operator project; the repo is public but ships no operator
+identity or credentials.
