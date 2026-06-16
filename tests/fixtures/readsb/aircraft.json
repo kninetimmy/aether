@@ -1,0 +1,90 @@
+{
+  "now": 1781000000.0,
+  "messages": 987654,
+  "aircraft": [
+    {
+      "hex": "a1b2c3",
+      "flight": "UAL123  ",
+      "lat": 40.7128,
+      "lon": -95.2,
+      "alt_baro": 35000,
+      "alt_geom": 35200,
+      "gs": 450.0,
+      "track": 271.4,
+      "baro_rate": -640,
+      "squawk": "1200",
+      "emergency": "none",
+      "category": "A3",
+      "rssi": -12.3,
+      "messages": 2345,
+      "seen": 0.1,
+      "seen_pos": 0.3,
+      "nic": 8,
+      "r": "N12345",
+      "t": "B738",
+      "dbFlags": 0
+    },
+    {
+      "hex": "abcdef",
+      "flight": "EMRG911 ",
+      "lat": 41.0,
+      "lon": -94.9,
+      "alt_baro": 12000,
+      "gs": 220.0,
+      "track": 90.0,
+      "baro_rate": 0,
+      "squawk": "7700",
+      "emergency": "general",
+      "category": "A2",
+      "rssi": -18.0,
+      "messages": 120,
+      "seen": 0.5,
+      "seen_pos": 0.5
+    },
+    {
+      "hex": "c0ffee",
+      "flight": "GND0001 ",
+      "lat": 40.8,
+      "lon": -95.1,
+      "alt_baro": "ground",
+      "gs": 7.0,
+      "track": 180.0,
+      "squawk": "1000",
+      "messages": 50,
+      "seen": 1.2,
+      "seen_pos": 1.5
+    },
+    {
+      "hex": "d00d11",
+      "flight": "NOPOS01 ",
+      "squawk": "2000",
+      "messages": 3,
+      "seen": 4.0
+    },
+    {
+      "hex": "badc00",
+      "lat": 200.0,
+      "lon": -400.0,
+      "alt_baro": 5000,
+      "messages": 1,
+      "seen": 2.0,
+      "seen_pos": 2.0
+    },
+    {
+      "hex": "~tis123",
+      "lat": 39.9,
+      "lon": -95.3,
+      "alt_baro": 4000,
+      "gs": 110.0,
+      "track": 45.0,
+      "messages": 10,
+      "seen": 0.8,
+      "seen_pos": 0.9
+    },
+    {
+      "flight": "NOHEX01 ",
+      "lat": 40.0,
+      "lon": -95.0
+    }
+  ]
+}
