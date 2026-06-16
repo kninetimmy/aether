@@ -20,6 +20,7 @@ from typing import Any
 import aiomqtt
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
+from aether.adapters.local_adsb import run_local_adsb
 from aether.backend.hub import Hub
 from aether.backend.protocol import snapshot_message
 from aether.bus.client import DEFAULT_RECONNECT_S, connect, run_record_subscriber
@@ -43,6 +44,8 @@ def create_app(*, settings: Settings | None = None, demo_interval_s: float = 1.0
         ]
         if cfg.demo_source:
             tasks.append(asyncio.create_task(_run_demo(cfg, ready, demo_interval_s)))
+        if cfg.local_adsb:
+            tasks.append(asyncio.create_task(run_local_adsb(cfg, ready)))
         try:
             yield
         finally:

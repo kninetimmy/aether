@@ -27,6 +27,9 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Cap a wedged leg (e.g. a hung broker round-trip) so it fails in minutes
+    # instead of holding the 6-hour default and blocking the merge gate.
+    timeout-minutes: 12
     strategy:
       fail-fast: false
       matrix:
@@ -65,6 +68,7 @@ jobs:
     # Type-check, lint, unit-test, and production-build the frontend shell
     # (PRD §33: "Lint, type-check, unit tests, ..., frontend build").
     runs-on: ubuntu-latest
+    timeout-minutes: 12
     defaults:
       run:
         working-directory: frontend

@@ -14,6 +14,18 @@ from dataclasses import dataclass
 DEFAULT_MQTT_HOST = "127.0.0.1"
 DEFAULT_MQTT_PORT = 1883
 
+#: Local ADS-B (`readsb`) snapshot location — a file path or http(s) URL to
+#: ``aircraft.json``. The common readsb/tar1090 layout serves it over HTTP; a
+#: bare path reads the on-disk snapshot directly. Only used when enabled.
+DEFAULT_LOCAL_ADSB_SOURCE = "http://127.0.0.1:8080/data/aircraft.json"
+#: How often the poller reads a fresh snapshot (PRD §17.4).
+DEFAULT_LOCAL_ADSB_POLL_S = 1.0
+#: At most one ordinary update per aircraft per this window (PRD §18.1); an
+#: emergency-squawk transition bypasses it.
+DEFAULT_LOCAL_ADSB_THROTTLE_S = 1.0
+#: Per-request timeout for URL snapshots (PRD §17.4 "use timeouts").
+DEFAULT_LOCAL_ADSB_TIMEOUT_S = 5.0
+
 
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
@@ -32,10 +44,29 @@ class Settings:
     #: gate). A real deployment leaves this off and runs source adapters instead.
     demo_source: bool = True
 
+    #: Run the local ADS-B (`readsb`) adapter alongside the backend. Off by
+    #: default — opt in once an `aircraft.json` source is reachable (M2.1).
+    local_adsb: bool = False
+    local_adsb_source: str = DEFAULT_LOCAL_ADSB_SOURCE
+    local_adsb_poll_s: float = DEFAULT_LOCAL_ADSB_POLL_S
+    local_adsb_throttle_s: float = DEFAULT_LOCAL_ADSB_THROTTLE_S
+    local_adsb_timeout_s: float = DEFAULT_LOCAL_ADSB_TIMEOUT_S
+
     @classmethod
     def from_env(cls) -> "Settings":
         return cls(
             mqtt_host=os.environ.get("AETHER_MQTT_HOST", DEFAULT_MQTT_HOST),
             mqtt_port=int(os.environ.get("AETHER_MQTT_PORT", DEFAULT_MQTT_PORT)),
             demo_source=_env_bool("AETHER_DEMO_SOURCE", True),
+            local_adsb=_env_bool("AETHER_LOCAL_ADSB", False),
+            local_adsb_source=os.environ.get("AETHER_LOCAL_ADSB_SOURCE", DEFAULT_LOCAL_ADSB_SOURCE),
+            local_adsb_poll_s=float(
+                os.environ.get("AETHER_LOCAL_ADSB_POLL_S", DEFAULT_LOCAL_ADSB_POLL_S)
+            ),
+            local_adsb_throttle_s=float(
+                os.environ.get("AETHER_LOCAL_ADSB_THROTTLE_S", DEFAULT_LOCAL_ADSB_THROTTLE_S)
+            ),
+            local_adsb_timeout_s=float(
+                os.environ.get("AETHER_LOCAL_ADSB_TIMEOUT_S", DEFAULT_LOCAL_ADSB_TIMEOUT_S)
+            ),
         )
