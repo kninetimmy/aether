@@ -1,0 +1,15 @@
+# Local message bus for the no-hardware gate (PRD §6, §23).
+#
+#   docker compose up -d        # start the broker
+#   uvicorn aether.backend.main:app --host 127.0.0.1 --port 8000
+#
+# The host port binds to 127.0.0.1 only — the broker is never exposed off-host
+# (PRD §23: "MQTT is loopback-bound unless explicitly secured otherwise").
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:1883:1883"
+    volumes:
+      - ./deploy/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
