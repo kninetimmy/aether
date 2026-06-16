@@ -3,6 +3,11 @@ agent_docs/PROJECT.md
 agent_docs/PROJECT_LEDGER.md
 .claude/settings.local.json
 
+# Node / frontend
+node_modules/
+frontend/dist/
+*.tsbuildinfo
+
 # Python
 __pycache__/
 *.py[cod]

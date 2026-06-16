@@ -1,0 +1,66 @@
+// Layer control (PRD §24.5): each active presentation layer with its live count
+// and a visibility toggle. Counts come straight from live state; styling/labels
+// come from the presentation registry via recordLayers.
+
+import { useMemo } from "react";
+import { activeLayers } from "../../map/layers/recordLayers";
+import {
+  featurePresentation,
+  trackPresentation,
+} from "../../map/presentationRegistry";
+import { useStore } from "../../state/store";
+
+export function LayerControl() {
+  const live = useStore((s) => s.live);
+  const setLayerVisible = useStore((s) => s.setLayerVisible);
+
+  const rows = useMemo(() => {
+    const counts = new Map<string, { label: string; color: string; count: number }>();
+    for (const t of live.tracks.values()) {
+      const p = trackPresentation(t);
+      const row = counts.get(p.layer) ?? { label: p.label, color: p.color, count: 0 };
+      row.count += 1;
+      counts.set(p.layer, row);
+    }
+    for (const f of live.features.values()) {
+      const p = featurePresentation(f);
+      const row = counts.get(p.layer) ?? { label: p.label, color: p.color, count: 0 };
+      row.count += 1;
+      counts.set(p.layer, row);
+    }
+    return activeLayers(live).map((layer) => ({
+      layer,
+      ...(counts.get(layer) ?? { label: layer, color: "#9aa6b2", count: 0 }),
+    }));
+  }, [live]);
+
+  const visibility = useStore((s) => s.layerVisible);
+
+  return (
+    <section className="panel-section" aria-label="Layers and filters">
+      <h2>Layers</h2>
+      {rows.length === 0 && <p className="muted">No layers active yet.</p>}
+      <ul className="layer-list">
+        {rows.map((r) => {
+          const visible = visibility[r.layer] !== false; // default-on
+          return (
+            <li key={r.layer} className="layer-row">
+              <label>
+                <input
+                  type="checkbox"
+                  checked={visible}
+                  onChange={(e) => setLayerVisible(r.layer, e.target.checked)}
+                />
+                <span className="swatch" style={{ background: r.color }} aria-hidden />
+                <span className="layer-name">{r.label}</span>
+              </label>
+              <span className="count" aria-label={`${r.count} live`}>
+                {r.count}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}

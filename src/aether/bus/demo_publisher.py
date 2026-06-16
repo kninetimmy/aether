@@ -1,8 +1,8 @@
 """No-hardware demo source: simulated mixed records published onto the bus.
 
-Stands in for the M2/M3 feeds so the COP renders tracks, features, events, and
-source status from simulated data (the M1 exit criterion) — now over real MQTT
-topics. :func:`demo_records` is the pure generator (sink-agnostic, reused by
+Stands in for the M2/M3 feeds so the COP renders tracks, features, events,
+alerts, and source status from simulated data (the M1 exit criterion) — now over
+real MQTT topics. :func:`demo_records` is the pure generator (sink-agnostic, reused by
 tests); :func:`run_demo_publisher` pumps it onto the bus. Nothing here transmits
 or touches hardware.
 
@@ -22,6 +22,7 @@ from aether.config import Settings
 from aether.schema.geometry import Point, Polygon
 from aether.schema.provenance import Provenance
 from aether.schema.records import (
+    AlertRecord,
     EventRecord,
     GeoFeatureRecord,
     Record,
@@ -42,7 +43,7 @@ def _now() -> datetime:
 
 
 async def demo_records(*, interval_s: float = 1.0) -> AsyncIterator[Record]:
-    """Yield an initial status + feature, then move tracks on each tick."""
+    """Yield an initial status + feature + alert, then move tracks on each tick."""
     started = _now()
     yield SourceStatusRecord(
         id="source_status:demo",
@@ -71,6 +72,21 @@ async def demo_records(*, interval_s: float = 1.0) -> AsyncIterator[Record]:
                 ]
             ]
         ),
+    )
+
+    yield AlertRecord(
+        id="alert:demo",
+        source=_SOURCE,
+        observed_at=started,
+        received_at=started,
+        published_at=started,
+        rule_id="demo-proximity",
+        subject_id="aircraft:demo0",
+        state="open",
+        severity="medium",
+        title="Demo aircraft in TFR",
+        summary="DEMO0 is loitering inside the demo TFR (simulated alert).",
+        triggered_at=started,
     )
 
     tick = 0

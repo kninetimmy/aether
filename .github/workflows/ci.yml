@@ -61,17 +61,42 @@ jobs:
       - name: Pytest
         run: pytest
 
+  frontend:
+    # Type-check, lint, unit-test, and production-build the frontend shell
+    # (PRD §33: "Lint, type-check, unit tests, ..., frontend build").
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Type-check
+        run: npm run typecheck
+      - name: Lint
+        run: npm run lint
+      - name: Unit tests
+        run: npm test
+      - name: Build
+        run: npm run build
+
   ci-success:
     # Single stable status check for branch protection: it stays "ci-success"
     # even if the test matrix gains or drops Python versions, so protection
     # rules never go stale. Fails if any matrix leg failed.
     name: ci-success
     if: always()
-    needs: [test]
+    needs: [test, frontend]
     runs-on: ubuntu-latest
     steps:
-      - name: Require all test jobs to pass
+      - name: Require all jobs to pass
         run: |
-          result="${{ needs.test.result }}"
-          echo "test matrix result: $result"
-          test "$result" = "success"
+          echo "test: ${{ needs.test.result }} / frontend: ${{ needs.frontend.result }}"
+          test "${{ needs.test.result }}" = "success"
+          test "${{ needs.frontend.result }}" = "success"
