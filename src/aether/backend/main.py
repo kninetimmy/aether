@@ -29,6 +29,9 @@ from aether.config import Settings
 
 log = logging.getLogger(__name__)
 
+#: Grace period for source tasks to stop on shutdown before they're abandoned.
+SHUTDOWN_GRACE_S = 5.0
+
 
 def create_app(*, settings: Settings | None = None, demo_interval_s: float = 1.0) -> FastAPI:
     cfg = settings if settings is not None else Settings.from_env()
@@ -51,9 +54,18 @@ def create_app(*, settings: Settings | None = None, demo_interval_s: float = 1.0
         finally:
             for task in tasks:
                 task.cancel()
-            for task in tasks:
-                with contextlib.suppress(asyncio.CancelledError):
-                    await task
+            # Bound the shutdown wait: aiomqtt's graceful disconnect-on-cancel can
+            # intermittently hang (observed flaky on Python 3.11), and an unbounded
+            # await would wedge shutdown — and any TestClient/lifespan around it —
+            # forever. Abandon a straggler after a short grace; the loop is tearing
+            # down regardless, so a stuck client connection is moot (PRD §37).
+            _done, pending = await asyncio.wait(tasks, timeout=SHUTDOWN_GRACE_S)
+            if pending:
+                log.warning(
+                    "%d source task(s) did not stop within %.0fs; abandoning",
+                    len(pending),
+                    SHUTDOWN_GRACE_S,
+                )
 
     app = FastAPI(title="aether COP", version="0.1.0", lifespan=lifespan)
 
