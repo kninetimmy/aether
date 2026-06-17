@@ -7,14 +7,16 @@ import { trackPresentation } from "../../map/presentationRegistry";
 import { useStore } from "../../state/store";
 
 export function TrackList() {
-  const live = useStore((s) => s.live);
+  // Key on the tracks Map, not the whole live object, so the list only re-sorts
+  // when tracks change — not on every alert/event/status frame.
+  const trackMap = useStore((s) => s.live.tracks);
 
   const tracks = useMemo(
     () =>
-      [...live.tracks.values()].sort((a, b) =>
+      [...trackMap.values()].sort((a, b) =>
         (a.label ?? a.id).localeCompare(b.label ?? b.id),
       ),
-    [live],
+    [trackMap],
   );
 
   return (

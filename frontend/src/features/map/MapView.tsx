@@ -24,11 +24,16 @@ export function MapView() {
   const mapRef = useRef<MlMap | null>(null);
   const readyRef = useRef(false);
 
-  const live = useStore((s) => s.live);
+  // Select the sub-collections, not the whole live object: the reducer keeps a
+  // stable Map reference for anything that didn't change in a frame, so these
+  // memos only rebuild when tracks/features actually move — not on every alert,
+  // event, or source-status tick.
+  const tracks = useStore((s) => s.live.tracks);
+  const features = useStore((s) => s.live.features);
   const layerVisible = useStore((s) => s.layerVisible);
 
-  const trackFc = useMemo(() => trackFeatureCollection(live), [live]);
-  const featureFc = useMemo(() => featureFeatureCollection(live), [live]);
+  const trackFc = useMemo(() => trackFeatureCollection(tracks), [tracks]);
+  const featureFc = useMemo(() => featureFeatureCollection(features), [features]);
 
   // Initialize the map once.
   useEffect(() => {
@@ -43,6 +48,9 @@ export function MapView() {
     mapRef.current = map;
 
     map.on("load", () => {
+      // Bail if the component unmounted before the style finished loading —
+      // the cleanup has already removed this map, so touching it would throw.
+      if (mapRef.current !== map) return;
       map.addSource(TRACK_SOURCE, { type: "geojson", data: emptyFc() });
       map.addSource(FEATURE_SOURCE, { type: "geojson", data: emptyFc() });
 
