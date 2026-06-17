@@ -139,3 +139,44 @@ def test_tracks_round_trip_through_the_bus_codec() -> None:
         reparsed = parse_record(dump_record_json(track))
         assert reparsed.id == track.id
         assert reparsed.kind == "track"
+
+
+def test_non_finite_numbers_dropped_and_still_serializable() -> None:
+    # Python's json accepts NaN/Infinity; they must not reach the record or they
+    # crash serialization on publish. Non-finite numeric fields become None.
+    data = {
+        "now": 1781000000.0,
+        "aircraft": [
+            {
+                "hex": "a1b2c3",
+                "lat": 40.0,
+                "lon": -95.0,
+                "alt_baro": float("inf"),
+                "gs": float("nan"),
+            }
+        ],
+    }
+    track = parse_aircraft_snapshot(data, received_at=RECEIVED_AT)[0]
+    assert track.altitude_m is None
+    assert track.speed_mps is None
+    # Must round-trip through the bus codec without raising on a non-finite value.
+    assert parse_record(dump_record_json(track)).id == track.id
+
+
+def test_out_of_range_snapshot_now_falls_back_without_crashing() -> None:
+    data = {"now": 1e30, "aircraft": [{"hex": "a1b2c3", "lat": 40.0, "lon": -95.0, "seen": 0.0}]}
+    track = parse_aircraft_snapshot(data, received_at=RECEIVED_AT)[0]
+    assert track.observed_at == RECEIVED_AT  # bad now ignored, anchored at receipt
+
+
+def test_absurd_aircraft_age_keeps_track_anchored_at_now() -> None:
+    data = {
+        "now": 1781000000.0,
+        "aircraft": [{"hex": "a1b2c3", "lat": 40.0, "lon": -95.0, "seen_pos": 1e308}],
+    }
+    track = parse_aircraft_snapshot(data, received_at=RECEIVED_AT)[0]
+    assert track.observed_at == datetime.fromtimestamp(1781000000.0, tz=UTC)
+
+
+def test_non_dict_snapshot_returns_empty() -> None:
+    assert parse_aircraft_snapshot(["not", "a", "dict"], received_at=RECEIVED_AT) == []  # type: ignore[arg-type]
