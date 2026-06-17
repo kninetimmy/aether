@@ -52,7 +52,9 @@ def apply_payload(payload: object, handle: RecordHandler) -> bool:
 
     Isolates a single malformed/oversized payload (PRD §37) so the subscriber loop
     never dies on bad input. Non-string/bytes payloads (we only publish JSON) are
-    ignored too.
+    ignored too. The ``handle`` call (state application) is also guarded: a bug or
+    bad-state error while applying one record must not tear down ingestion for
+    every other source and client.
     """
     if not isinstance(payload, (bytes, str)):
         return False
@@ -61,7 +63,11 @@ def apply_payload(payload: object, handle: RecordHandler) -> bool:
     except (ValidationError, RecordTooLargeError, ValueError):
         log.warning("dropping malformed record payload")
         return False
-    handle(record)
+    try:
+        handle(record)
+    except Exception:
+        log.exception("failed to apply record %s to state; dropping", record.id)
+        return False
     return True
 
 

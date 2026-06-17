@@ -52,3 +52,12 @@ def test_non_bytes_payload_ignored() -> None:
     received: list[Record] = []
     assert apply_payload(None, received.append) is False
     assert received == []
+
+
+def test_handler_exception_is_isolated_not_raised() -> None:
+    # A bug while applying one record to state must not propagate out and kill the
+    # subscriber loop — the whole ingest path for every source depends on it (§37).
+    def boom(_record: Record) -> None:
+        raise RuntimeError("state apply blew up")
+
+    assert apply_payload(dump_record_json(_track()), boom) is False

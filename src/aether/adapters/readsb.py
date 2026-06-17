@@ -21,6 +21,7 @@ aircraft entry is skipped without dropping the rest of the snapshot.
 """
 
 import logging
+import math
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -43,20 +44,33 @@ EMERGENCY_SQUAWKS = frozenset({"7500", "7600", "7700"})
 
 
 def _num(value: object) -> float | None:
-    """Coerce a JSON number to float, rejecting bools and non-numbers."""
+    """Coerce a JSON number to a finite float, rejecting bools and non-numbers.
+
+    ``NaN``/``Infinity`` are rejected: Python's ``json`` accepts them by default,
+    but they are invalid JSON to re-emit and would crash the record's serialization
+    on publish to the bus (PRD §17.2 "validate source responses").
+    """
     if isinstance(value, bool):  # bool is an int subclass; never an altitude/speed
         return None
     if isinstance(value, (int, float)):
-        return float(value)
+        result = float(value)
+        return result if math.isfinite(result) else None
     return None
 
 
 def _epoch_to_dt(value: object) -> datetime | None:
-    """Convert a Unix epoch-seconds number to an aware UTC datetime."""
+    """Convert a Unix epoch-seconds number to an aware UTC datetime.
+
+    Out-of-range epochs (extreme or negative) can raise on some platforms; treat
+    those as "no usable time" rather than letting one bad field crash the parse.
+    """
     secs = _num(value)
     if secs is None:
         return None
-    return datetime.fromtimestamp(secs, tz=UTC)
+    try:
+        return datetime.fromtimestamp(secs, tz=UTC)
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 def _valid_lonlat(lon: float | None, lat: float | None) -> bool:
@@ -101,7 +115,10 @@ def aircraft_to_track(
     age_s = _num(ac.get("seen_pos"))
     if age_s is None:
         age_s = _num(ac.get("seen")) or 0.0
-    observed_at = snapshot_now - timedelta(seconds=age_s)
+    try:
+        observed_at = snapshot_now - timedelta(seconds=age_s)
+    except (OverflowError, ValueError):  # absurd age: keep the track, anchor at now
+        observed_at = snapshot_now
 
     lon, lat = _num(ac.get("lon")), _num(ac.get("lat"))
     has_pos = _valid_lonlat(lon, lat)
@@ -209,6 +226,8 @@ def parse_aircraft_snapshot(
     is logged and skipped so one bad record never drops the whole snapshot
     (PRD §17.2, §37 failure isolation).
     """
+    if not isinstance(data, dict):  # defensive: a non-object snapshot has no tracks
+        return []
     snapshot_now = _epoch_to_dt(data.get("now")) or received_at
     aircraft = data.get("aircraft")
     if not isinstance(aircraft, list):
