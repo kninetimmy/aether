@@ -1,0 +1,20 @@
+{
+  "now": 1718500000.0,
+  "messages": 100000,
+  "aircraft": [
+    {
+      "hex": "e00001",
+      "flight": "FAKE911 ",
+      "lat": 40.8,
+      "lon": -95.0,
+      "alt_baro": 8000,
+      "gs": 250.0,
+      "track": 90.0,
+      "squawk": "7700",
+      "emergency": "general",
+      "category": "A2",
+      "seen": 0.1,
+      "seen_pos": 0.2
+    }
+  ]
+}

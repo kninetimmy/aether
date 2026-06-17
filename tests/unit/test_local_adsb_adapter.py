@@ -71,18 +71,22 @@ def take(agen: AsyncIterator[Record], n: int) -> list[Record]:
 
 def test_throttle_admits_first_then_suppresses_until_interval() -> None:
     gate = ThrottleGate(1.0)
-    assert gate.admit("a", T0, emergency=False) is True  # first sighting always
-    assert gate.admit("a", T0 + timedelta(seconds=0.5), emergency=False) is False
-    assert gate.admit("a", T0 + timedelta(seconds=1.0), emergency=False) is True  # due
+    assert gate.admit("a", T0, emergency=False).publish is True  # first sighting always
+    assert gate.admit("a", T0 + timedelta(seconds=0.5), emergency=False).publish is False
+    assert gate.admit("a", T0 + timedelta(seconds=1.0), emergency=False).publish is True  # due
 
 
 def test_throttle_emergency_transition_bypasses_interval() -> None:
     gate = ThrottleGate(100.0)
-    assert gate.admit("b", T0, emergency=False) is True
-    # Flip to emergency well within the throttle window: published immediately.
-    assert gate.admit("b", T0 + timedelta(seconds=0.1), emergency=True) is True
-    # Still emergency but no new transition -> back under the throttle.
-    assert gate.admit("b", T0 + timedelta(seconds=0.2), emergency=True) is False
+    first = gate.admit("b", T0, emergency=False)
+    assert (first.publish, first.emergency_onset) == (True, False)
+    # Flip to emergency well within the throttle window: published immediately and
+    # flagged as the onset edge that drives the emergency event template.
+    onset = gate.admit("b", T0 + timedelta(seconds=0.1), emergency=True)
+    assert (onset.publish, onset.emergency_onset) == (True, True)
+    # Still emergency but no new transition -> back under the throttle, no onset.
+    held = gate.admit("b", T0 + timedelta(seconds=0.2), emergency=True)
+    assert (held.publish, held.emergency_onset) == (False, False)
 
 
 def test_throttle_prune_forgets_absent_aircraft() -> None:
@@ -91,8 +95,8 @@ def test_throttle_prune_forgets_absent_aircraft() -> None:
     gate.admit("b", T0, emergency=False)
     gate.prune({"a"})
     # 'a' still throttled; 'b' was pruned so it's a fresh sighting again.
-    assert gate.admit("a", T0 + timedelta(seconds=0.1), emergency=False) is False
-    assert gate.admit("b", T0 + timedelta(seconds=0.1), emergency=False) is True
+    assert gate.admit("a", T0 + timedelta(seconds=0.1), emergency=False).publish is False
+    assert gate.admit("b", T0 + timedelta(seconds=0.1), emergency=False).publish is True
 
 
 # --- ReadsbSource + snapshot loading (PRD §17.2, §17.4) -----------------------
@@ -147,7 +151,10 @@ def test_backoff_caps_at_max() -> None:
 
 def test_generator_emits_starting_then_tracks_and_connected_health() -> None:
     snapshot = json.loads(FIXTURE.read_text())
-    items = take(local_adsb_records(_FakeSource([snapshot]), poll_s=0.0, throttle_s=1.0), 8)
+    # The fixture includes an aircraft squawking 7700, so the first cycle also
+    # yields one emergency event between the tracks and the connected status; take
+    # enough to span the whole cycle.
+    items = take(local_adsb_records(_FakeSource([snapshot]), poll_s=0.0, throttle_s=1.0), 16)
 
     assert items[0].kind == "source_status"
     assert items[0].status == "starting"  # type: ignore[union-attr]
@@ -167,7 +174,7 @@ def test_generator_publishes_emergency_transition_immediately() -> None:
     # it to 7500. A large throttle window proves the publish is the transition,
     # not the interval.
     snaps = [fake_snapshot(0, now_epoch=1.0), fake_snapshot(3, now_epoch=2.0)]
-    items = take(local_adsb_records(_FakeSource(snaps), poll_s=0.0, throttle_s=100.0), 7)
+    items = take(local_adsb_records(_FakeSource(snaps), poll_s=0.0, throttle_s=100.0), 8)
 
     emergency_tracks = [
         i
@@ -175,6 +182,31 @@ def test_generator_publishes_emergency_transition_immediately() -> None:
         if i.kind == "track" and i.id == "aircraft:icao:e00001" and "emergency" in i.tags
     ]
     assert emergency_tracks, "emergency-squawk transition must publish despite the throttle"
+
+
+def test_generator_emits_emergency_squawk_event_on_transition() -> None:
+    # The §32 M2 emergency-squawk template: the not-emergency -> 7500 transition
+    # must also yield a discrete critical event, carrying the subject track, its
+    # position, and local provenance — the substrate the M4 alert engine consumes.
+    snaps = [fake_snapshot(0, now_epoch=1.0), fake_snapshot(3, now_epoch=2.0)]
+    items = take(local_adsb_records(_FakeSource(snaps), poll_s=0.0, throttle_s=100.0), 8)
+
+    events = [i for i in items if i.kind == "event"]
+    assert len(events) == 1, "exactly one event per emergency onset"
+    event = events[0]
+    assert event.event_type == "emergency_squawk"  # type: ignore[union-attr]
+    assert event.severity == "critical"  # type: ignore[union-attr]
+    assert event.subject_id == "aircraft:icao:e00001"  # type: ignore[union-attr]
+    assert "7500" in event.summary  # type: ignore[union-attr]
+    assert "emergency" in event.tags
+    assert event.geometry is not None and event.geometry.type == "Point"  # type: ignore[union-attr]
+    assert event.provenance[0].local_rf is True
+
+    # A steady stream of the same 7500 squawk does not re-fire the event: only the
+    # onset edge does. Drive several more emergency snapshots and confirm one event.
+    steady = [fake_snapshot(3, now_epoch=float(t)) for t in range(2, 8)]
+    items2 = take(local_adsb_records(_FakeSource(steady), poll_s=0.0, throttle_s=100.0), 12)
+    assert sum(1 for i in items2 if i.kind == "event") == 1
 
 
 def test_generator_marks_degraded_on_failed_poll() -> None:
