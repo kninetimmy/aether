@@ -52,3 +52,8 @@ warn_required_dynamic_aliases = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+# Put the repo root on sys.path so tests can import the shared fixture packages
+# (e.g. `from tests.fixtures.aprs import kiss_frames`). Without this it only works
+# under `python -m pytest` (which adds CWD); bare `pytest` in CI would not — this
+# keeps the two invocations equivalent.
+pythonpath = ["."]

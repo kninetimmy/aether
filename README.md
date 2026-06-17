@@ -84,6 +84,30 @@ npm install
 npm run dev                                                   # Vite dev server, connects to /ws/v2
 ```
 
+### Local SDR adapters (no radio needed)
+
+Each local source ships a fake feeder so its full path (adapter → bus → state →
+websocket → UI) runs with no SDR. Turn off the demo source and run a feeder +
+its adapter:
+
+```bash
+# Local ADS-B (readsb) — fake aircraft.json feeder + adapter
+python -m aether.adapters.readsb_fake_feeder /tmp/aircraft.json &              # writes a data file only
+AETHER_DEMO_SOURCE=0 AETHER_LOCAL_ADSB=1 \
+    AETHER_LOCAL_ADSB_SOURCE=/tmp/aircraft.json \
+    uvicorn aether.backend.main:app --app-dir src
+
+# Local APRS (Dire Wolf) — fake KISS server + adapter
+python -m aether.adapters.aprs_fake_feeder 127.0.0.1 8001 &                    # fake KISS frames only; never transmits
+AETHER_DEMO_SOURCE=0 AETHER_LOCAL_APRS=1 \
+    AETHER_LOCAL_APRS_HOST=127.0.0.1 AETHER_LOCAL_APRS_PORT=8001 \
+    uvicorn aether.backend.main:app --app-dir src
+```
+
+The APRS station is **receive-only**: see [`docs/local-aprs-igate.md`](docs/local-aprs-igate.md)
+and the sample [`config/direwolf.conf.example`](config/direwolf.conf.example) for the
+real-radio setup and the no-transmit guardrail.
+
 ---
 
 ## Verify

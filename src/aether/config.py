@@ -26,6 +26,15 @@ DEFAULT_LOCAL_ADSB_THROTTLE_S = 1.0
 #: Per-request timeout for URL snapshots (PRD §17.4 "use timeouts").
 DEFAULT_LOCAL_ADSB_TIMEOUT_S = 5.0
 
+#: Local APRS (Dire Wolf KISS) endpoint — loopback only, the KISSPORT Dire Wolf
+#: serves (default 8001). aether only *reads* this socket (receive-only, PRD §18.3).
+DEFAULT_LOCAL_APRS_HOST = "127.0.0.1"
+DEFAULT_LOCAL_APRS_PORT = 8001
+#: At most one ordinary update per station per this window (PRD §18.1).
+DEFAULT_LOCAL_APRS_THROTTLE_S = 1.0
+#: Connect timeout for the KISS socket (PRD §17.4 "use timeouts").
+DEFAULT_LOCAL_APRS_TIMEOUT_S = 5.0
+
 
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
@@ -52,6 +61,15 @@ class Settings:
     local_adsb_throttle_s: float = DEFAULT_LOCAL_ADSB_THROTTLE_S
     local_adsb_timeout_s: float = DEFAULT_LOCAL_ADSB_TIMEOUT_S
 
+    #: Run the local APRS (Dire Wolf KISS) adapter alongside the backend. Off by
+    #: default — opt in once Dire Wolf's KISS port is reachable (M2.2b). aether
+    #: only reads this socket; Dire Wolf does the RX->APRS-IS gating (PRD §18.3).
+    local_aprs: bool = False
+    local_aprs_host: str = DEFAULT_LOCAL_APRS_HOST
+    local_aprs_port: int = DEFAULT_LOCAL_APRS_PORT
+    local_aprs_throttle_s: float = DEFAULT_LOCAL_APRS_THROTTLE_S
+    local_aprs_timeout_s: float = DEFAULT_LOCAL_APRS_TIMEOUT_S
+
     @classmethod
     def from_env(cls) -> "Settings":
         return cls(
@@ -68,5 +86,14 @@ class Settings:
             ),
             local_adsb_timeout_s=float(
                 os.environ.get("AETHER_LOCAL_ADSB_TIMEOUT_S", DEFAULT_LOCAL_ADSB_TIMEOUT_S)
+            ),
+            local_aprs=_env_bool("AETHER_LOCAL_APRS", False),
+            local_aprs_host=os.environ.get("AETHER_LOCAL_APRS_HOST", DEFAULT_LOCAL_APRS_HOST),
+            local_aprs_port=int(os.environ.get("AETHER_LOCAL_APRS_PORT", DEFAULT_LOCAL_APRS_PORT)),
+            local_aprs_throttle_s=float(
+                os.environ.get("AETHER_LOCAL_APRS_THROTTLE_S", DEFAULT_LOCAL_APRS_THROTTLE_S)
+            ),
+            local_aprs_timeout_s=float(
+                os.environ.get("AETHER_LOCAL_APRS_TIMEOUT_S", DEFAULT_LOCAL_APRS_TIMEOUT_S)
             ),
         )
