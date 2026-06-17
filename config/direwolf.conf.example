@@ -1,0 +1,117 @@
+###############################################################################
+#  aether — Dire Wolf sample config: RECEIVE-ONLY 144.39 MHz APRS iGate
+#
+#  Copy to direwolf.conf and supply your own MYCALL + IGLOGIN passcode.
+#  This repo ships NO real callsign, passcode, or station coordinates — every
+#  operator provides their own (aether decision: repo carries no operator
+#  identity or location).
+#
+#  ---------------------------------------------------------------------------
+#  RECEIVE-ONLY. This is the load-bearing guardrail (decision 1 / PRD §2.3,
+#  APRS-FR-003/004, PRD §18.3): the station may forward valid RF packets it
+#  HEARS up to APRS-IS, but it NEVER transmits over RF — no beacon, no
+#  digipeat, no RF message ack, and NO Internet-to-RF path.
+#
+#  How that is enforced HERE, in the config:
+#    * There is intentionally NO IGTXVIA line. IGTXVIA is THE directive that
+#      enables the Internet-to-RF (IS->RF) gate; with it absent there is no
+#      IS->RF path at all. This is the single decisive guardrail.
+#    * There is NO PTT directive of any kind. Without PTT, Dire Wolf prints
+#      "Note: PTT not configured for channel 0." and CANNOT key a transmitter.
+#    * There are NO beacon directives, so nothing ever asks Dire Wolf to
+#      generate transmit audio. (In this SDR setup the audio OUTPUT device is
+#      `null` and no transceiver is wired, so even external-VOX transmit —
+#      the only route that bypasses PTT — is physically impossible.)
+#
+#  aether itself reads the KISS socket below and is STRICTLY read-only on it:
+#  the KISS TCP socket is bidirectional at the protocol level (an app that
+#  WRITES a KISS data frame is asking Dire Wolf to transmit), so aether never
+#  writes to it (PRD §18.3: "Never send packets back to KISS/AGW for
+#  transmission.").
+#
+#  Dire Wolf owns the iGate gating logic and its counts; aether does NOT
+#  implement custom packet gating (APRS-FR-004 / PRD §18.3).
+#  ---------------------------------------------------------------------------
+###############################################################################
+
+#  --- Receive chain -------------------------------------------------------- #
+
+# Audio device: input/output. `null null` is INTENTIONAL for a piped SDR — the
+# input half is overridden on the Dire Wolf command line (trailing `-` reads
+# audio from stdin), and there is deliberately no audio OUTPUT device. Do not
+# "fix" this to a sound-card name. Typical launch (input overridden on the CLI):
+#
+#   rtl_fm -f 144.39M -o 4 -s 24000 -g 49 -p <ppm> - | \
+#       direwolf -c direwolf.conf -r 24000 -D 1 -t 0 -
+#
+# (-r 24000 matches `rtl_fm -s 24000`; -t 0 disables color; trailing `-` =
+#  read audio from stdin.)
+ADEVICE null null
+
+# Audio sample rate. Optional here — set it to match rtl_fm, or pass `-r` on
+# the command line instead. Listed for clarity.
+ARATE 24000
+
+# Channel 0 is the first/only radio.
+CHANNEL 0
+
+# Your amateur-radio callsign (SSID allowed, e.g. N0CALL-10). PLACEHOLDER —
+# replace with your own. The repo must never carry a real callsign.
+MYCALL N0CALL
+
+# 1200 baud AFSK is the standard for 144.39 MHz APRS. This is already the
+# per-channel default; stating it is explicit-and-correct, not required.
+MODEM 1200
+
+# TCP KISS port that aether's local APRS adapter reads (AETHER_LOCAL_APRS_PORT,
+# default 8001). aether is read-only on this socket — see the header. The AGW
+# port (default 8000) is left off since aether consumes KISS; enable it with
+# `AGWPORT 8000` only if some other read-only client needs it.
+KISSPORT 8001
+
+#  --- Receive-only iGate (RF heard -> APRS-IS) ----------------------------- #
+#  This is the ONLY outbound path: valid packets HEARD over RF are relayed up
+#  to the APRS-IS network by Dire Wolf. It does not, and cannot, put anything
+#  back onto RF (no IGTXVIA below). This satisfies APRS-FR-003 / PRD §18.3.
+
+# Tier-2 regional rotate address (pick yours): noam.aprs2.net (North America),
+# soam.aprs2.net (South America), euro.aprs2.net (Europe/Africa),
+# asia.aprs2.net (Asia), aunz.aprs2.net (Oceania). Use a rotate address.
+IGSERVER noam.aprs2.net
+
+# APRS-IS login: your callsign + your APRS passcode (from the standard APRS
+# passcode generator). PLACEHOLDERS — replace both. Never commit a real one.
+IGLOGIN N0CALL 00000
+
+###############################################################################
+#  INTENTIONALLY ABSENT — DO NOT ADD (each would create a transmit / beacon /
+#  digipeat / Internet-to-RF path and would violate decision 1 / PRD §2.3 /
+#  APRS-FR-003/004). A CI grep fails the build if any appears uncommented.
+#
+#    IGTXVIA        Internet-to-RF (IS->RF) gate. THE transmit-enabling line.
+#                   Its absence is what guarantees no IS->RF path. Never add it.
+#    IGTXLIMIT      IS->RF transmit rate limit; only meaningful with IGTXVIA.
+#    PBEACON        Periodic position beacon (transmits over RF).
+#    OBEACON        Periodic object-report beacon (RF).
+#    TBEACON        Tracker (GPS) beacon (RF).
+#    CBEACON        Custom/automated beacon (RF; can be morse/speech).
+#    IBEACON        IGate status beacon (transmits over RF by default).
+#                   Omitted entirely — Dire Wolf still tracks iGate counts
+#                   internally without beaconing them.
+#    SMARTBEACONING Speed-adaptive beacon timing; reshapes a TBEACON. Can't
+#                   transmit alone, but listed so a TBEACON pairing isn't missed.
+#    DIGIPEAT       APRS digipeating (re-transmits RF). (Dire Wolf prose calls
+#                   the feature "DIGIPEATER"; the directive token is DIGIPEAT.)
+#    CDIGIPEAT      Connected-mode digipeating (re-transmits RF).
+#    PTT            Keys a transmitter (serial RTS/DTR, GPIO, hamlib, CM108, …).
+#                   Without it Dire Wolf cannot key any transmitter.
+#
+#  Also irrelevant to a receive-only station and omitted: transmit-timing
+#  tuning (TXDELAY/TXTAIL/DWAIT/SLOTTIME/PERSIST) — they don't transmit on
+#  their own, but a clean RX-only config leaves them out.
+#
+#  Provenance note: ICHANNEL / NCHANNEL are NOT transmit risks, but they would
+#  inject APRS-IS traffic into the KISS stream and muddy aether's "local RF
+#  only" provenance. Leave them unconfigured so every KISS frame aether reads
+#  is genuinely off-air.
+###############################################################################

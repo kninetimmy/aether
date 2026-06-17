@@ -50,6 +50,16 @@ jobs:
         run: ruff format --check .
       - name: Mypy (strict, src/)
         run: mypy
+      - name: Receive-only guard (no TX directives in sample Dire Wolf config)
+        # The receive-only guarantee (decision 1 / PRD §2.3 / §18.3) rests on these
+        # directives being ABSENT from config/direwolf.conf.example. Fail the build
+        # if any appears uncommented, so the load-bearing guardrail is enforced and
+        # the claim in the config + docs is true. (grep exits 0 when it matches.)
+        run: |
+          if grep -nE '^[[:space:]]*(IGTXVIA|IGTXLIMIT|PBEACON|OBEACON|TBEACON|CBEACON|IBEACON|SMARTBEACONING|DIGIPEAT|CDIGIPEAT|PTT)([[:space:]]|$)' config/direwolf.conf.example; then
+            echo "ERROR: uncommented transmit/beacon directive found above; aether is RECEIVE-ONLY." >&2
+            exit 1
+          fi
       - name: Start Mosquitto broker (bus integration tests)
         # The MQTT round-trip test (tests/integration) skips when no broker is
         # reachable; start one with the repo's loopback config so it runs in CI.
