@@ -6,16 +6,19 @@ import { severityColor } from "../../map/presentationRegistry";
 import { useStore } from "../../state/store";
 
 export function EventFeed() {
-  const live = useStore((s) => s.live);
+  // Key each memo on its own collection (stable reference unless it changed), so
+  // an alert update doesn't re-reverse events and vice versa.
+  const alertMap = useStore((s) => s.live.alerts);
+  const eventList = useStore((s) => s.live.events);
 
   const alerts = useMemo(
     () =>
-      [...live.alerts.values()].sort((a, b) =>
+      [...alertMap.values()].sort((a, b) =>
         b.triggered_at.localeCompare(a.triggered_at),
       ),
-    [live],
+    [alertMap],
   );
-  const events = useMemo(() => [...live.events].reverse(), [live]);
+  const events = useMemo(() => [...eventList].reverse(), [eventList]);
 
   return (
     <section className="feed" aria-label="Timeline and events">

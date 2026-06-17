@@ -7,8 +7,12 @@ import {
   featurePresentation,
   trackPresentation,
 } from "../presentationRegistry";
-import type { LiveState } from "../../state/liveState";
-import type { GeoJSONGeometry, GeoJSONPoint } from "../../types/records";
+import type {
+  GeoFeatureRecord,
+  GeoJSONGeometry,
+  GeoJSONPoint,
+  TrackRecord,
+} from "../../types/records";
 
 export interface MapFeatureProps {
   id: string;
@@ -36,9 +40,11 @@ export interface FeatureCollection {
 }
 
 /** Point features for all tracks that currently have a position. */
-export function trackFeatureCollection(state: LiveState): FeatureCollection {
+export function trackFeatureCollection(
+  tracks: Map<string, TrackRecord>,
+): FeatureCollection {
   const features: MapFeature[] = [];
-  for (const track of state.tracks.values()) {
+  for (const track of tracks.values()) {
     if (!track.geometry) continue;
     const p = trackPresentation(track);
     features.push({
@@ -63,9 +69,11 @@ export function trackFeatureCollection(state: LiveState): FeatureCollection {
 }
 
 /** Features for all geo-features (TFRs, fires, geofences, …). */
-export function featureFeatureCollection(state: LiveState): FeatureCollection {
+export function featureFeatureCollection(
+  geoFeatures: Map<string, GeoFeatureRecord>,
+): FeatureCollection {
   const features: MapFeature[] = [];
-  for (const feat of state.features.values()) {
+  for (const feat of geoFeatures.values()) {
     const p = featurePresentation(feat);
     features.push({
       type: "Feature",
@@ -89,9 +97,12 @@ export function featureFeatureCollection(state: LiveState): FeatureCollection {
 }
 
 /** Distinct presentation layer ids present in current state, for layer control. */
-export function activeLayers(state: LiveState): string[] {
+export function activeLayers(
+  tracks: Map<string, TrackRecord>,
+  geoFeatures: Map<string, GeoFeatureRecord>,
+): string[] {
   const layers = new Set<string>();
-  for (const t of state.tracks.values()) layers.add(trackPresentation(t).layer);
-  for (const f of state.features.values()) layers.add(featurePresentation(f).layer);
+  for (const t of tracks.values()) layers.add(trackPresentation(t).layer);
+  for (const f of geoFeatures.values()) layers.add(featurePresentation(f).layer);
   return [...layers].sort();
 }

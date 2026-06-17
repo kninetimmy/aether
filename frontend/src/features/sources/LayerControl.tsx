@@ -11,28 +11,32 @@ import {
 import { useStore } from "../../state/store";
 
 export function LayerControl() {
-  const live = useStore((s) => s.live);
+  // Counts only depend on tracks + features; key the memo on those so a status
+  // or event tick doesn't recompute every layer count (the reducer keeps stable
+  // Map references for unchanged collections).
+  const tracks = useStore((s) => s.live.tracks);
+  const features = useStore((s) => s.live.features);
   const setLayerVisible = useStore((s) => s.setLayerVisible);
 
   const rows = useMemo(() => {
     const counts = new Map<string, { label: string; color: string; count: number }>();
-    for (const t of live.tracks.values()) {
+    for (const t of tracks.values()) {
       const p = trackPresentation(t);
       const row = counts.get(p.layer) ?? { label: p.label, color: p.color, count: 0 };
       row.count += 1;
       counts.set(p.layer, row);
     }
-    for (const f of live.features.values()) {
+    for (const f of features.values()) {
       const p = featurePresentation(f);
       const row = counts.get(p.layer) ?? { label: p.label, color: p.color, count: 0 };
       row.count += 1;
       counts.set(p.layer, row);
     }
-    return activeLayers(live).map((layer) => ({
+    return activeLayers(tracks, features).map((layer) => ({
       layer,
       ...(counts.get(layer) ?? { label: layer, color: "#9aa6b2", count: 0 }),
     }));
-  }, [live]);
+  }, [tracks, features]);
 
   const visibility = useStore((s) => s.layerVisible);
 
