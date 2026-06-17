@@ -15,16 +15,19 @@ from aether.backend.main import create_app
 from aether.config import Settings
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "readsb" / "aircraft.json"
+EMERGENCY_FIXTURE = (
+    Path(__file__).resolve().parents[1] / "fixtures" / "readsb" / "aircraft_emergency.json"
+)
 
 
-def _app(settings: Settings) -> TestClient:
-    # Demo off, local ADS-B on, pointed at the fixture file. throttle=0 so every
+def _app(settings: Settings, *, source: str = str(FIXTURE)) -> TestClient:
+    # Demo off, local ADS-B on, pointed at a fixture file. throttle=0 so every
     # fast poll re-publishes, giving the ws client a steady stream to assert on.
     cfg = dataclasses.replace(
         settings,
         demo_source=False,
         local_adsb=True,
-        local_adsb_source=str(FIXTURE),
+        local_adsb_source=source,
         local_adsb_poll_s=0.05,
         local_adsb_throttle_s=0.0,
     )
@@ -58,3 +61,26 @@ def test_local_adsb_publishes_source_status(broker_settings: Settings) -> None:
                     break
         assert connected is not None
         assert connected["attributes"]["aircraft_visible"] >= 1
+
+
+def test_local_adsb_emits_emergency_squawk_event(broker_settings: Settings) -> None:
+    # The §32 M2 emergency-squawk template, end to end: an aircraft squawking 7700
+    # on first sighting is an onset edge, so the adapter emits a critical event
+    # that reaches the ws client as a discrete `event` frame with local provenance.
+    with (
+        _app(broker_settings, source=str(EMERGENCY_FIXTURE)) as client,
+        client.websocket_connect("/ws/v2") as ws,
+    ):
+        ws.receive_json()  # snapshot
+        event = None
+        for _ in range(80):
+            msg = ws.receive_json()
+            if msg["type"] == "event" and msg["record"]["event_type"] == "emergency_squawk":
+                event = msg["record"]
+                break
+        assert event is not None
+        assert event["severity"] == "critical"
+        assert event["subject_id"] == "aircraft:icao:e00001"
+        assert "7700" in event["summary"]
+        assert event["geometry"]["type"] == "Point"
+        assert event["provenance"][0]["local_rf"] is True

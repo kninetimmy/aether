@@ -29,14 +29,14 @@ import urllib.error
 import urllib.request
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 import aiomqtt
 
 from aether.adapters.readsb import SOURCE, parse_aircraft_snapshot
 from aether.bus.client import connect
 from aether.config import Settings
-from aether.schema.records import Record, SourceStatusRecord
+from aether.schema.records import EventRecord, Record, SourceStatusRecord, TrackRecord
 
 log = logging.getLogger(__name__)
 
@@ -50,6 +50,14 @@ MAX_BACKOFF_S = 30.0
 
 #: Stable id for this source's retained health record (PRD §23 status stream).
 STATUS_ID = f"source_status:{SOURCE}"
+
+#: Plain-language meaning of each transponder emergency code, for the §32 M2
+#: emergency-squawk event template (PRD §11.2).
+EMERGENCY_SQUAWK_MEANINGS = {
+    "7500": "unlawful interference (hijack)",
+    "7600": "radio communication failure",
+    "7700": "general emergency",
+}
 
 
 class SnapshotUnchanged(Exception):
@@ -132,6 +140,19 @@ class ReadsbSource:
         return _loads_snapshot(raw)
 
 
+class Admission(NamedTuple):
+    """Outcome of a :meth:`ThrottleGate.admit` call.
+
+    ``publish`` is whether the track clears the throttle this cycle;
+    ``emergency_onset`` is whether this admit is a not-emergency -> emergency edge
+    (the trigger for the emergency-squawk event template). An onset always implies
+    ``publish`` — the gate force-publishes the transition.
+    """
+
+    publish: bool
+    emergency_onset: bool
+
+
 class ThrottleGate:
     """Per-aircraft publish gate enforcing the §18.1 update policy.
 
@@ -146,15 +167,16 @@ class ThrottleGate:
         self._last_published: dict[str, datetime] = {}
         self._emergency: dict[str, bool] = {}
 
-    def admit(self, track_id: str, now: datetime, *, emergency: bool) -> bool:
+    def admit(self, track_id: str, now: datetime, *, emergency: bool) -> Admission:
         was_emergency = self._emergency.get(track_id, False)
         self._emergency[track_id] = emergency
+        onset = emergency and not was_emergency
         last = self._last_published.get(track_id)
         due = last is None or (now - last).total_seconds() >= self._interval_s
-        if (emergency and not was_emergency) or due:
+        if onset or due:
             self._last_published[track_id] = now
-            return True
-        return False
+            return Admission(publish=True, emergency_onset=onset)
+        return Admission(publish=False, emergency_onset=False)
 
     def prune(self, live_ids: set[str]) -> None:
         self._last_published = {k: v for k, v in self._last_published.items() if k in live_ids}
@@ -179,6 +201,46 @@ def _receiver_health(snapshot: dict[str, Any], aircraft_visible: int) -> dict[st
     if messages is not None:
         health["messages_total"] = messages
     return health
+
+
+def _emergency_event(track: TrackRecord, now: datetime) -> EventRecord:
+    """Build the critical EventRecord for an aircraft's emergency-squawk onset.
+
+    The M2 "emergency squawk template" (PRD §32): when a locally-received aircraft
+    transitions into a 7500/7600/7700 squawk (or an explicit transponder
+    ``emergency`` flag), surface a discrete critical event in the timeline — the
+    substrate the M4 alert-rule engine will later consume. The event carries the
+    squawk's plain-language meaning, the subject track, and its last known position
+    so the feed entry is actionable on its own. Provenance is copied from the
+    track (``local_rf``), so the event is unambiguously a local observation. The id
+    is keyed to the track and its observed time so one onset yields one event while
+    distinct episodes stay distinguishable.
+    """
+    squawk = track.attributes.get("squawk")
+    emergency = track.attributes.get("emergency")
+    meaning = EMERGENCY_SQUAWK_MEANINGS.get(squawk) if isinstance(squawk, str) else None
+    who = track.label or track.id
+    if meaning is not None:
+        summary = f"{who} squawking {squawk} ({meaning})"
+    elif isinstance(emergency, str) and emergency not in ("", "none"):
+        summary = f"{who} declaring emergency ({emergency})"
+    else:
+        summary = f"{who} declaring emergency"
+    return EventRecord(
+        id=f"event:emergency:{track.id}:{int(track.observed_at.timestamp())}",
+        source=SOURCE,
+        observed_at=track.observed_at,
+        received_at=now,
+        published_at=now,
+        correlation_key=track.correlation_key,
+        event_type="emergency_squawk",
+        subject_id=track.id,
+        summary=summary,
+        geometry=track.geometry,
+        severity="critical",
+        tags=["emergency"],
+        provenance=list(track.provenance),
+    )
 
 
 def _status(
@@ -219,10 +281,12 @@ async def local_adsb_records(
     """Yield the local ADS-B record stream: status, then throttled tracks + health.
 
     Emits ``starting`` immediately, then polls forever. Each good poll yields the
-    admitted tracks (see :class:`ThrottleGate`) followed by a ``connected`` status
-    carrying receiver health and lag. A failed poll yields a ``degraded`` status
-    (keeping the last good tracks on the map) and backs off with jitter before
-    retrying — one bad poll never tears down the stream (PRD §17.4, §37).
+    admitted tracks (see :class:`ThrottleGate`), a critical ``emergency_squawk``
+    event for any aircraft that just transitioned into an emergency squawk (the
+    §32 M2 template), and finally a ``connected`` status carrying receiver health
+    and lag. A failed poll yields a ``degraded`` status (keeping the last good
+    tracks on the map) and backs off with jitter before retrying — one bad poll
+    never tears down the stream (PRD §17.4, §37).
     """
     yield _status("starting", _now())
     gate = ThrottleGate(throttle_s)
@@ -254,10 +318,17 @@ async def local_adsb_records(
         live_ids = {t.id for t in tracks}
         last_record_at: datetime | None = None
         for track in tracks:
-            if gate.admit(track.id, now, emergency="emergency" in track.tags):
-                received += 1
-                last_record_at = track.observed_at
-                yield track
+            admission = gate.admit(track.id, now, emergency="emergency" in track.tags)
+            if not admission.publish:
+                continue
+            received += 1
+            last_record_at = track.observed_at
+            yield track
+            # An emergency onset emits the §32 template event alongside the track;
+            # it's derived output, not a source record, so it isn't counted in
+            # ``received`` / ``last_record_at``.
+            if admission.emergency_onset:
+                yield _emergency_event(track, now)
         gate.prune(live_ids)
 
         snapshot_now = _epoch(snapshot.get("now"))
