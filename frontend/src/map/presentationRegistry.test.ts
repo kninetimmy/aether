@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
   featurePresentation,
+  militaryBadge,
   presentationFor,
   severityColor,
   sourceStateColor,
   trackPresentation,
 } from "./presentationRegistry";
 import type {
+  Classification,
   FeatureType,
   GeoFeatureRecord,
   TrackRecord,
@@ -100,6 +102,32 @@ describe("presentationFor", () => {
   it("returns null for non-spatial kinds", () => {
     expect(presentationFor({ kind: "alert" } as never)).toBeNull();
     expect(presentationFor({ kind: "source_status" } as never)).toBeNull();
+  });
+});
+
+describe("militaryBadge", () => {
+  const cls = (over: Partial<Classification>): Classification => ({
+    military: true,
+    basis: "provider",
+    confidence: "medium",
+    note: null,
+    ...over,
+  });
+
+  it("is null when there is no military classification", () => {
+    expect(militaryBadge(null)).toBeNull();
+    expect(militaryBadge(undefined)).toBeNull();
+    expect(militaryBadge(cls({ military: null }))).toBeNull();
+    expect(militaryBadge(cls({ military: false }))).toBeNull();
+  });
+
+  it("renders a hedged badge naming the basis, never claiming certainty", () => {
+    const badge = militaryBadge(cls({ basis: "address_block", confidence: "low" }));
+    expect(badge).not.toBeNull();
+    expect(badge!.text).toBe("MIL?"); // hedged, not "MIL"/"CONFIRMED"
+    expect(badge!.title).toContain("address-block");
+    expect(badge!.title).toContain("low");
+    expect(badge!.title.toLowerCase()).toContain("not authoritative");
   });
 });
 

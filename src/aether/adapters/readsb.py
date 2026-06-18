@@ -22,9 +22,11 @@ aircraft entry is skipped without dropping the rest of the snapshot.
 
 import logging
 import math
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from aether.adapters.mil_classify import IcaoRange, classify_military
 from aether.schema.geometry import Point
 from aether.schema.provenance import Provenance
 from aether.schema.records import TrackRecord
@@ -93,6 +95,7 @@ def aircraft_to_track(
     snapshot_now: datetime,
     received_at: datetime,
     source: str = SOURCE,
+    mil_ranges: Sequence[IcaoRange] = (),
 ) -> TrackRecord | None:
     """Normalize one ``aircraft.json`` entry into a :class:`TrackRecord`.
 
@@ -100,7 +103,8 @@ def aircraft_to_track(
     track or fuse on). A present-but-impossible position drops the geometry only;
     the identified track is still published (PRD §17.2: avoid clearing known
     fields). Units are converted to SI; readsb-native fields are preserved under
-    ``attributes``.
+    ``attributes``. ``mil_ranges`` (operator-supplied military ICAO blocks) plus the
+    readsb ``dbFlags`` military bit drive the §11.5 classification basis.
     """
     raw_hex = ac.get("hex")
     if not isinstance(raw_hex, str) or not raw_hex.strip():
@@ -185,6 +189,12 @@ def aircraft_to_track(
     if on_ground:
         attributes["on_ground"] = True
 
+    classification = classify_military(
+        hex_id, db_flags=ac.get("dbFlags"), non_icao=non_icao, ranges=mil_ranges
+    )
+    if classification is not None:
+        tags.append("military")
+
     return TrackRecord(
         id=f"aircraft:icao:{hex_id}",
         source=source,
@@ -200,6 +210,7 @@ def aircraft_to_track(
         heading_deg=heading_deg,
         vertical_rate_mps=vertical_rate_mps,
         locally_received=True,
+        classification=classification,
         tags=tags,
         attributes=attributes,
         provenance=[
@@ -218,13 +229,15 @@ def parse_aircraft_snapshot(
     *,
     received_at: datetime,
     source: str = SOURCE,
+    mil_ranges: Sequence[IcaoRange] = (),
 ) -> list[TrackRecord]:
     """Normalize a full ``aircraft.json`` snapshot into a list of tracks.
 
     The snapshot's top-level ``now`` (epoch seconds) anchors per-aircraft message
     ages; it falls back to ``received_at`` if absent. A malformed individual entry
     is logged and skipped so one bad record never drops the whole snapshot
-    (PRD §17.2, §37 failure isolation).
+    (PRD §17.2, §37 failure isolation). ``mil_ranges`` is threaded to the per-entry
+    classifier (PRD §11.5).
     """
     if not isinstance(data, dict):  # defensive: a non-object snapshot has no tracks
         return []
@@ -239,7 +252,11 @@ def parse_aircraft_snapshot(
             continue
         try:
             track = aircraft_to_track(
-                entry, snapshot_now=snapshot_now, received_at=received_at, source=source
+                entry,
+                snapshot_now=snapshot_now,
+                received_at=received_at,
+                source=source,
+                mil_ranges=mil_ranges,
             )
         except Exception:  # one bad aircraft must not drop the rest of the snapshot
             log.warning("skipping malformed readsb aircraft entry", exc_info=True)

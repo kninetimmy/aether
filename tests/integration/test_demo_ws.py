@@ -105,6 +105,15 @@ def test_demo_fusion_appears_as_one_track(broker_settings: Settings) -> None:
         # demo03 local-only, demo04 network-only.
         assert tracks["aircraft:icao:demo03"]["locally_received"] is True
         assert tracks["aircraft:icao:demo04"]["locally_received"] is False
+
+        # The demo carries a military-classification example on each §11.5 basis
+        # (PRD §31.4): demo03 provider-reported, demo04 address-block — both hedged
+        # below "high" confidence.
+        d03_cls = tracks["aircraft:icao:demo03"]["classification"]
+        d04_cls = tracks["aircraft:icao:demo04"]["classification"]
+        assert d03_cls is not None and d03_cls["basis"] == "provider"
+        assert d04_cls is not None and d04_cls["basis"] == "address_block"
+        assert {d03_cls["confidence"], d04_cls["confidence"]}.isdisjoint({"high"})
         # demo02 survives and renders (its strict LOCAL→NET flip is asserted at the
         # engine-unit level — 0.05s ticks can't exceed the 60s local-expire window).
         assert "aircraft:icao:demo02" in tracks

@@ -6,7 +6,7 @@
 // heard it (PRD §8.1, §11.4). Full detail panel comes with selection later.
 
 import { useMemo } from "react";
-import { trackPresentation } from "../../map/presentationRegistry";
+import { militaryBadge, trackPresentation } from "../../map/presentationRegistry";
 import { visibleTracks } from "../../state/selectors";
 import { useStore } from "../../state/store";
 import { fusionMeta, type TrackRecord } from "../../types/records";
@@ -46,6 +46,7 @@ export function TrackList() {
           const p = trackPresentation(t);
           const meta = fusionMeta(t);
           const fused = meta !== undefined && meta.fused_count > 1;
+          const mil = militaryBadge(t.classification);
           return (
             <li key={t.id} className="track-row">
               <span className="swatch" style={{ background: p.color }} aria-hidden />
@@ -57,6 +58,11 @@ export function TrackList() {
               >
                 {t.locally_received ? "LOCAL" : "NET"}
               </span>
+              {mil && (
+                <span className="mil" title={mil.title}>
+                  {mil.text}
+                </span>
+              )}
               {fused && (
                 <span className="fused" title={fusionTooltip(t)}>
                   ×{meta.fused_count}

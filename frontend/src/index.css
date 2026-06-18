@@ -260,6 +260,17 @@ ul {
   background: #33414f;
   cursor: help;
 }
+/* Military classification — hedged "MIL?" with caution amber, never an alarming
+   "confirmed" red (honest labeling, PRD §11.5 MIL-FR-005). */
+.mil {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 4px;
+  border-radius: 3px;
+  color: var(--bg);
+  background: #d98c4a;
+  cursor: help;
+}
 
 /* Provenance filter: the flagship collapse-to-local-only control (PRD §8.2). */
 .provenance-filter {

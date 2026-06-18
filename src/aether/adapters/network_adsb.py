@@ -32,7 +32,7 @@ provider's stated limits; it never transmits and never bypasses a rate cap
 import asyncio
 import logging
 import random
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -47,6 +47,7 @@ from aether.adapters.adsb_provider import (
     observation_to_track,
 )
 from aether.adapters.aoi import GeoRegion, tile_region
+from aether.adapters.mil_classify import IcaoRange, parse_ranges
 from aether.bus.client import connect
 from aether.config import Settings
 from aether.schema.records import Record, SourceStatusRecord
@@ -143,6 +144,7 @@ async def network_adsb_records(
     *,
     poll_s: float = 5.0,
     rate_limit_s: float = 1.0,
+    mil_ranges: Sequence[IcaoRange] = (),
 ) -> AsyncIterator[Record]:
     """Yield the network ADS-B record stream: status, then deduped tracks + health.
 
@@ -198,7 +200,7 @@ async def network_adsb_records(
         deduped = dedupe_observations(observations)
         last_record_at: datetime | None = None
         for obs in deduped:
-            track = observation_to_track(obs, provider=provider.name)
+            track = observation_to_track(obs, provider=provider.name, mil_ranges=mil_ranges)
             received += 1
             if last_record_at is None or obs.observed_at > last_record_at:
                 last_record_at = obs.observed_at
@@ -249,6 +251,7 @@ async def run_network_adsb(
     aoi = aoi_from_settings(cfg)
     resolved_poll = poll_s if poll_s is not None else cfg.network_adsb_poll_s
     resolved_rate = rate_limit_s if rate_limit_s is not None else cfg.network_adsb_rate_limit_s
+    mil_ranges = parse_ranges(cfg.mil_icao_blocks)
     log.info("network ADS-B adapter -> %s (AOI %.0f NM)", prov.name, aoi.radius_nm)
     backoff = INITIAL_BACKOFF_S
     while True:
@@ -256,7 +259,11 @@ async def run_network_adsb(
             async with connect(cfg, identifier="aether-network-adsb") as bus:
                 backoff = INITIAL_BACKOFF_S  # reset once connected
                 async for record in network_adsb_records(
-                    prov, aoi, poll_s=resolved_poll, rate_limit_s=resolved_rate
+                    prov,
+                    aoi,
+                    poll_s=resolved_poll,
+                    rate_limit_s=resolved_rate,
+                    mil_ranges=mil_ranges,
                 ):
                     await bus.publish_record(record)
                 return  # generator exhausted (only on cancellation in practice)

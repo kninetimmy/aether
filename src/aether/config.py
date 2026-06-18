@@ -56,6 +56,16 @@ DEFAULT_NETWORK_ADSB_RATE_LIMIT_S = 1.0
 #: Per-request timeout for a provider query (PRD §17.4 "use timeouts").
 DEFAULT_NETWORK_ADSB_TIMEOUT_S = 10.0
 
+#: Military ICAO 24-bit address blocks for the address-block classification basis
+#: (PRD §11.5 MIL-FR-002). **Deliberately empty** — the repo ships the *mechanism*,
+#: not a baked-in allocation table that could silently mislabel civil airframes if
+#: stale/wrong (honest-labeling decision). The operator supplies verified ranges via
+#: ``AETHER_MIL_ICAO_BLOCKS`` as comma-separated ``start-end`` hex pairs, e.g.
+#: ``"adf7c8-afffff, 43c000-43cfff"``; parsed at the adapter edge by
+#: :func:`aether.adapters.mil_classify.parse_ranges`. Empty → that basis stays inert
+#: and only the provider ``dbFlags`` bit classifies (MIL-FR-001).
+DEFAULT_MIL_ICAO_BLOCKS = ""
+
 
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
@@ -101,6 +111,11 @@ class Settings:
     network_adsb_poll_s: float = DEFAULT_NETWORK_ADSB_POLL_S
     network_adsb_rate_limit_s: float = DEFAULT_NETWORK_ADSB_RATE_LIMIT_S
     network_adsb_timeout_s: float = DEFAULT_NETWORK_ADSB_TIMEOUT_S
+
+    #: Operator-supplied military ICAO address blocks (raw config string; parsed at
+    #: the ADS-B edge). Shared by both the local and network ADS-B adapters so they
+    #: classify identically (PRD §11.5 MIL-FR-002).
+    mil_icao_blocks: str = DEFAULT_MIL_ICAO_BLOCKS
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -152,4 +167,5 @@ class Settings:
             network_adsb_timeout_s=float(
                 os.environ.get("AETHER_NETWORK_ADSB_TIMEOUT_S", DEFAULT_NETWORK_ADSB_TIMEOUT_S)
             ),
+            mil_icao_blocks=os.environ.get("AETHER_MIL_ICAO_BLOCKS", DEFAULT_MIL_ICAO_BLOCKS),
         )
