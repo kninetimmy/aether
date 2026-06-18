@@ -41,11 +41,14 @@ class FreshnessWindow:
 
 #: Source-name → window. ``local_adsb`` is the readsb SOURCE; ``demo`` is the
 #: no-hardware demo's LOCAL leg (both ADS-B local: live 0-5s / stale 5-30s /
-#: expire 60s). ``demo-net`` is the demo's NETWORK leg, on the network-grade
-#: ADS-B window (live 0-15s / stale 15-60s / expire 120s) — PRD §15.4.
+#: expire 60s). ``network_adsb`` is the Internet ADS-B provider SOURCE and
+#: ``demo-net`` is the demo's NETWORK leg — both on the network-grade ADS-B
+#: window (live 0-15s / stale 15-60s / expire 120s), looser than local because a
+#: feed batches and lags more than the operator's own antenna (PRD §15.4).
 DEFAULT_FRESHNESS: dict[str, FreshnessWindow] = {
     "local_adsb": FreshnessWindow(5.0, 30.0, 60.0),
     "demo": FreshnessWindow(5.0, 30.0, 60.0),
+    "network_adsb": FreshnessWindow(15.0, 60.0, 120.0),
     "demo-net": FreshnessWindow(15.0, 60.0, 120.0),
 }
 
