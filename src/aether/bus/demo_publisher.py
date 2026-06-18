@@ -2,9 +2,22 @@
 
 Stands in for the M2/M3 feeds so the COP renders tracks, features, events,
 alerts, and source status from simulated data (the M1 exit criterion) — now over
-real MQTT topics. :func:`demo_records` is the pure generator (sink-agnostic, reused by
-tests); :func:`run_demo_publisher` pumps it onto the bus. Nothing here transmits
-or touches hardware.
+real MQTT topics. As of M3.1 it also exercises the *fusion* engine: a LOCAL leg
+(``demo``, ``local_rf=True``) and a NETWORK leg (``demo-net``, ``local_rf=False``)
+publish the same aircraft under a shared ``correlation_key``, so the backend
+fuses them into one track. :func:`demo_records` is the pure generator
+(sink-agnostic, reused by tests); :func:`run_demo_publisher` pumps it onto the
+bus. Nothing here transmits or touches hardware.
+
+Four scenario aircraft cover the fusion contract (notional coords near (-95, 40);
+nothing transmits):
+
+* ``demo01`` — both legs every tick (local lacks speed/label, network supplies
+  them): one fused track, two contributors (FUSION-FR-001/002/003/005).
+* ``demo02`` — local for the first few ticks then silent while network continues:
+  the fused track keeps moving and flips to network provenance (FUSION-FR-004).
+* ``demo03`` — local only (``locally_received=True``).
+* ``demo04`` — network only (``locally_received=False``).
 
 Run standalone against a broker::
 
@@ -32,22 +45,95 @@ from aether.schema.records import (
 
 log = logging.getLogger(__name__)
 
-#: Two notional aircraft orbiting points near a home station.
-_ORBIT_CENTERS = [(-95.2, 40.7), (-94.8, 40.9)]
-
+#: The demo's local-RF leg (an ADS-B-local freshness window) and its network leg.
 _SOURCE = "demo"
+_SOURCE_NET = "demo-net"
+
+#: Notional orbit centers for the four scenario aircraft, near a home station.
+_AIRCRAFT_CENTERS: dict[str, tuple[float, float]] = {
+    "demo01": (-95.2, 40.7),
+    "demo02": (-94.8, 40.9),
+    "demo03": (-95.4, 40.5),
+    "demo04": (-94.6, 41.1),
+}
+
+#: After this many ticks demo02's local leg goes silent so the network leg carries
+#: the track on its own (the FUSION-FR-004 LOCAL→NET handoff). Note: at fast test
+#: ticks the elapsed wall-clock can't exceed the 60s local-expire window, so the
+#: *handoff itself* is asserted at the engine-unit level, not over the live demo.
+_DEMO02_LOCAL_TICKS = 3
 
 
 def _now() -> datetime:
     return datetime.now(UTC)
 
 
+def _orbit(center: tuple[float, float], heading: float, radius: float = 0.1) -> Point:
+    angle = math.radians(heading)
+    lon = center[0] + radius * math.cos(angle)
+    lat = center[1] + radius * math.sin(angle)
+    return Point(coordinates=[lon, lat, 3000.0])
+
+
+def _local_leg(key: str, now: datetime, heading: float) -> TrackRecord:
+    """A LOCAL (own-antenna) observation: position + heading, but NO speed/label.
+
+    Omitting speed and label lets the network leg *fill* those fields while the
+    local leg still wins position (FUSION-FR-002/003).
+    """
+    return TrackRecord(
+        id=f"{_SOURCE}:{key}",
+        source=_SOURCE,
+        observed_at=now,
+        received_at=now,
+        published_at=now,
+        correlation_key=f"aircraft:icao:{key}",
+        track_type="aircraft",
+        geometry=_orbit(_AIRCRAFT_CENTERS[key], heading),
+        altitude_m=3000.0,
+        heading_deg=heading,
+        locally_received=True,
+        provenance=[Provenance(source=_SOURCE, observed_at=now, received_at=now, local_rf=True)],
+    )
+
+
+def _net_leg(key: str, now: datetime, heading: float) -> TrackRecord:
+    """A NETWORK (Internet feed) observation: slightly offset position, WITH speed + label."""
+    net_geom = _orbit(_AIRCRAFT_CENTERS[key], heading, radius=0.1005)
+    return TrackRecord(
+        id=f"{_SOURCE_NET}:{key}",
+        source=_SOURCE_NET,
+        observed_at=now,
+        received_at=now,
+        published_at=now,
+        correlation_key=f"aircraft:icao:{key}",
+        track_type="aircraft",
+        label="DEMO-FUSE",
+        geometry=net_geom,
+        altitude_m=3000.0,
+        speed_mps=120.0,
+        heading_deg=heading,
+        locally_received=False,
+        provenance=[
+            Provenance(source=_SOURCE_NET, observed_at=now, received_at=now, local_rf=False)
+        ],
+    )
+
+
 async def demo_records(*, interval_s: float = 1.0) -> AsyncIterator[Record]:
-    """Yield an initial status + feature + alert, then move tracks on each tick."""
+    """Yield startup status/feature/alert, then move the scenario aircraft each tick."""
     started = _now()
     yield SourceStatusRecord(
         id="source_status:demo",
         source=_SOURCE,
+        observed_at=started,
+        received_at=started,
+        published_at=started,
+        status="connected",
+    )
+    yield SourceStatusRecord(
+        id="source_status:demo-net",
+        source=_SOURCE_NET,
         observed_at=started,
         received_at=started,
         published_at=started,
@@ -81,11 +167,11 @@ async def demo_records(*, interval_s: float = 1.0) -> AsyncIterator[Record]:
         received_at=started,
         published_at=started,
         rule_id="demo-proximity",
-        subject_id="aircraft:demo0",
+        subject_id="aircraft:icao:demo01",
         state="open",
         severity="medium",
         title="Demo aircraft in TFR",
-        summary="DEMO0 is loitering inside the demo TFR (simulated alert).",
+        summary="DEMO-FUSE is loitering inside the demo TFR (simulated alert).",
         triggered_at=started,
     )
 
@@ -94,34 +180,21 @@ async def demo_records(*, interval_s: float = 1.0) -> AsyncIterator[Record]:
         await asyncio.sleep(interval_s)
         tick += 1
         now = _now()
-        for n, (lon0, lat0) in enumerate(_ORBIT_CENTERS):
-            heading = (tick * 10 + n * 180) % 360
-            angle = math.radians(heading)
-            lon = lon0 + 0.1 * math.cos(angle)
-            lat = lat0 + 0.1 * math.sin(angle)
-            local = n == 0
-            yield TrackRecord(
-                id=f"aircraft:demo{n}",
-                source=_SOURCE,
-                observed_at=now,
-                received_at=now,
-                published_at=now,
-                track_type="aircraft",
-                label=f"DEMO{n}",
-                geometry=Point(coordinates=[lon, lat, 3000.0]),
-                altitude_m=3000.0,
-                speed_mps=120.0,
-                heading_deg=float(heading),
-                locally_received=local,
-                provenance=[
-                    Provenance(
-                        source=_SOURCE,
-                        observed_at=now,
-                        received_at=now,
-                        local_rf=local,
-                    )
-                ],
-            )
+        heading = float((tick * 10) % 360)
+
+        # demo01: both legs every tick → one fused track, two contributors.
+        yield _local_leg("demo01", now, heading)
+        yield _net_leg("demo01", now, heading)
+
+        # demo02: local for the first few ticks, then network-only (handoff).
+        if tick <= _DEMO02_LOCAL_TICKS:
+            yield _local_leg("demo02", now, heading)
+        yield _net_leg("demo02", now, heading)
+
+        # demo03: local only. demo04: network only.
+        yield _local_leg("demo03", now, heading)
+        yield _net_leg("demo04", now, heading)
+
         if tick % 5 == 0:
             yield EventRecord(
                 id=f"event:demo:{tick}",
@@ -139,7 +212,7 @@ async def demo_records(*, interval_s: float = 1.0) -> AsyncIterator[Record]:
             received_at=now,
             published_at=now,
             status="connected",
-            records_received=tick * len(_ORBIT_CENTERS),
+            records_received=tick,
         )
 
 

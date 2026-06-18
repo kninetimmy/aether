@@ -2,6 +2,9 @@
 
 from datetime import UTC, datetime, timedelta
 
+from aether.fusion.engine import FUSION_ATTR_KEY, FusionEngine
+from aether.schema.geometry import Point
+from aether.schema.provenance import Provenance
 from aether.schema.records import (
     AlertRecord,
     EventRecord,
@@ -12,6 +15,49 @@ from aether.schema.records import (
 from aether.state import LiveState
 
 T0 = datetime(2026, 6, 15, 12, 0, 0, tzinfo=UTC)
+CORR = "aircraft:icao:abc"
+
+
+def _local_track(observed_at: datetime = T0) -> TrackRecord:
+    return TrackRecord(
+        id="local_adsb:abc",
+        source="local_adsb",
+        observed_at=observed_at,
+        received_at=observed_at,
+        published_at=observed_at,
+        correlation_key=CORR,
+        track_type="aircraft",
+        geometry=Point(coordinates=[-95.0, 40.0, 3000.0]),
+        altitude_m=3000.0,
+        locally_received=True,
+        provenance=[
+            Provenance(
+                source="local_adsb", observed_at=observed_at, received_at=observed_at, local_rf=True
+            )
+        ],
+    )
+
+
+def _net_track(observed_at: datetime = T0) -> TrackRecord:
+    return TrackRecord(
+        id="demo-net:abc",
+        source="demo-net",
+        observed_at=observed_at,
+        received_at=observed_at,
+        published_at=observed_at,
+        correlation_key=CORR,
+        track_type="aircraft",
+        label="DEMO-FUSE",
+        geometry=Point(coordinates=[-95.001, 40.001, 3000.0]),
+        altitude_m=3000.0,
+        speed_mps=120.0,
+        locally_received=False,
+        provenance=[
+            Provenance(
+                source="demo-net", observed_at=observed_at, received_at=observed_at, local_rf=False
+            )
+        ],
+    )
 
 
 def _track(id: str = "aircraft:1", valid_until: datetime | None = None) -> TrackRecord:
@@ -143,3 +189,116 @@ def test_seq_is_monotonic_across_ops() -> None:
         state.apply(_event("e")).seq,
     ]
     assert seqs == [1, 2, 3, 4]
+
+
+# --- Fusion routing (M3.1, FUSION-FR-001/004/006) --------------------------
+
+
+def test_correlation_key_track_yields_one_upsert_at_key() -> None:
+    state = LiveState()
+    change = state.apply(_local_track(), now=T0)
+    assert (change.op, change.kind, change.id, change.seq) == ("upsert", "track", CORR, 1)
+    assert state.seq == 1  # exactly one mutation per source record
+
+
+def test_local_plus_network_same_key_is_one_track() -> None:
+    state = LiveState()
+    state.apply(_local_track(), now=T0)
+    state.apply(_net_track(), now=T0)
+    snap = state.snapshot()
+    assert len(snap.tracks) == 1
+    fused = snap.tracks[0]
+    assert fused.id == CORR
+    assert fused.attributes[FUSION_ATTR_KEY]["fused_count"] == 2
+
+
+def test_none_key_track_keyed_by_own_id_without_fusion() -> None:
+    # FUSION-FR-006: no correlation key → no fusion path, keyed by record.id.
+    state = LiveState()
+    change = state.apply(_track(id="aircraft:loose"), now=T0)
+    assert change.id == "aircraft:loose"
+    fused = state.snapshot().tracks[0]
+    assert FUSION_ATTR_KEY not in fused.attributes
+
+
+def test_expire_removes_fused_only_after_all_contributors_expire() -> None:
+    state = LiveState()
+    state.apply(_local_track(), now=T0)
+    state.apply(_net_track(), now=T0)
+
+    # At 90s local has expired but network survives: continuation upsert, no remove.
+    changes = state.expire(now=T0 + timedelta(seconds=90))
+    ops = {(c.op, c.id) for c in changes}
+    assert ("upsert", CORR) in ops
+    assert ("remove", CORR) not in ops
+    fused = state.snapshot().tracks[0]
+    assert fused.locally_received is False  # flipped to network continuation
+
+    # Past the network window too: the fused track is removed.
+    changes2 = state.expire(now=T0 + timedelta(seconds=200))
+    assert ("remove", CORR) in {(c.op, c.id) for c in changes2}
+    assert state.snapshot().tracks == []
+
+
+def test_remove_clears_engine_group() -> None:
+    state = LiveState()
+    state.apply(_local_track(), now=T0)
+    state.remove("track", CORR)
+    # Re-ingesting starts a fresh group (fused_count back to 1, not 2).
+    state.apply(_net_track(), now=T0)
+    fused = state.snapshot().tracks[0]
+    assert fused.attributes[FUSION_ATTR_KEY]["fused_count"] == 1
+
+
+# --- Failure isolation (review findings) -----------------------------------
+
+
+class _IngestRaises(FusionEngine):
+    """Engine whose ingest always raises, to exercise the degraded fallback."""
+
+    def ingest(self, record: TrackRecord, now: datetime) -> TrackRecord:
+        raise RuntimeError("boom")
+
+
+def test_degraded_fallback_rekeys_record_to_correlation_key() -> None:
+    # Finding 1: a transient fusion failure on a source whose id != correlation
+    # key must store/emit the record under the correlation key, so the delta's
+    # record.id == StateChange.id and a later expiry remove can clean it up
+    # (no permanent ghost track on clients).
+    state = LiveState(fusion=_IngestRaises())
+    change = state.apply(_net_track(), now=T0)  # _net_track().id == "demo-net:abc" != CORR
+    assert change.id == CORR
+    assert change.record is not None
+    assert change.record.id == CORR  # rewritten to match the StateChange id
+    assert [t.id for t in state.snapshot().tracks] == [CORR]
+
+    # Because the dict key == the stored record's id == CORR, a remove keyed by
+    # CORR (what a later engine expiry emits) actually deletes it — no ghost.
+    remove = state.remove("track", CORR)
+    assert (remove.op, remove.id) == ("remove", CORR)
+    assert state.snapshot().tracks == []
+
+
+class _RecomputeRaises(FusionEngine):
+    """Engine that reports one poison key dirty whose recompute always raises."""
+
+    def __init__(self, poison: str) -> None:
+        super().__init__()
+        self._poison = poison
+
+    def dirty_keys(self, now: datetime) -> list[str]:
+        return [self._poison]
+
+    def recompute(self, key: str, now: datetime) -> TrackRecord | None:
+        raise RuntimeError("poison fuse")
+
+
+def test_poison_group_does_not_abort_expiry_sweep() -> None:
+    # Finding 2: a single group whose recompute raises must be dropped/logged,
+    # not propagate out of expire() and strand every other expiry forever.
+    state = LiveState(fusion=_RecomputeRaises(poison=CORR))
+    # A None-key track that should still age out despite the poison group.
+    state.apply(_track(id="loose", valid_until=T0), now=T0)
+    changes = state.expire(now=T0 + timedelta(minutes=1))  # must not raise
+    assert ("remove", "loose") in {(c.op, c.id) for c in changes}
+    assert state.snapshot().tracks == []

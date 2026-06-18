@@ -91,6 +91,41 @@ export interface TrackRecord extends RecordBase {
   predicted: boolean;
 }
 
+// --- Fusion metadata (M3.1) ------------------------------------------------
+// The backend fuses same-identity local-RF + network observations into one
+// track and stashes the diagnostics under attributes.fusion (PRD §11.4, §15) —
+// no schema bump. These shapes mirror src/aether/fusion/engine.py's fusion block;
+// read them with `fusionMeta(track)`, which returns undefined when absent.
+
+export type FreshnessClass = "live" | "stale" | "expired";
+
+export interface FusionContributor {
+  source: string;
+  local_rf: boolean;
+  observed_at: string;
+  freshness: FreshnessClass;
+}
+
+export interface FusionMeta {
+  /** Source supplying the headline geometry — PRD §8.1's "who am I seeing this from". */
+  active_source: string;
+  contributors: FusionContributor[];
+  /** Winning source per dynamic field (or null when no contributor carries it). */
+  field_sources: Record<string, string | null>;
+  field_freshness: Record<string, FreshnessClass | null>;
+  /** When the operator's own antenna last heard this — survives local expiry (PRD §8.1). */
+  last_local_rf_at: string | null;
+  /** Number of current contributing sources. */
+  fused_count: number;
+}
+
+/** Read the fusion block off a track; undefined when absent or malformed. */
+export function fusionMeta(track: TrackRecord): FusionMeta | undefined {
+  const raw = track.attributes?.["fusion"];
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  return raw as FusionMeta;
+}
+
 // --- GeoFeature ------------------------------------------------------------
 
 export type FeatureType =
