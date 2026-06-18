@@ -91,6 +91,34 @@ def test_local_and_network_duplicates_fuse_into_one_track(
         assert a1b2c3[0]["attributes"]["fusion"]["fused_count"] == 2
 
 
+def test_address_block_classification_flows_to_ws(
+    broker_settings: Settings, tmp_path: Path
+) -> None:
+    # MIL-FR-002 end to end, no hardware: with the fake roster's network-only
+    # cafe01 inside an operator-supplied military ICAO block, the real network
+    # runner classifies it on an "address_block" basis and fusion carries that onto
+    # the track the ws delivers — with honest, non-authoritative confidence (§11.5).
+    source = _fresh_fixture(FIXTURE, tmp_path)
+    cfg = dataclasses.replace(broker_settings, mil_icao_blocks="cafe00-cafe0f")
+    with _app(cfg, source=source) as client, client.websocket_connect("/ws/v2") as ws:
+        ws.receive_json()  # snapshot
+        mil = None
+        for _ in range(400):
+            msg = ws.receive_json()
+            if (
+                msg["type"] == "track_upsert"
+                and msg["record"]["id"] == "aircraft:icao:cafe01"
+                and msg["record"].get("classification") is not None
+            ):
+                mil = msg["record"]
+                break
+        assert mil is not None, "cafe01 never arrived with a classification"
+        assert mil["classification"]["military"] is True
+        assert mil["classification"]["basis"] == "address_block"
+        assert mil["classification"]["confidence"] != "high"
+        assert "military" in mil["tags"]
+
+
 def test_network_only_airframe_stays_a_network_track(
     broker_settings: Settings, tmp_path: Path
 ) -> None:

@@ -27,12 +27,13 @@ import logging
 import random
 import urllib.error
 import urllib.request
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 from typing import Any, Literal, NamedTuple
 
 import aiomqtt
 
+from aether.adapters.mil_classify import IcaoRange, parse_ranges
 from aether.adapters.readsb import SOURCE, parse_aircraft_snapshot
 from aether.bus.client import connect
 from aether.config import Settings
@@ -277,6 +278,7 @@ async def local_adsb_records(
     *,
     poll_s: float = 1.0,
     throttle_s: float = 1.0,
+    mil_ranges: Sequence[IcaoRange] = (),
 ) -> AsyncIterator[Record]:
     """Yield the local ADS-B record stream: status, then throttled tracks + health.
 
@@ -314,7 +316,9 @@ async def local_adsb_records(
             continue
         backoff = INITIAL_BACKOFF_S  # reset on a successful read
 
-        tracks = parse_aircraft_snapshot(snapshot, received_at=now, source=SOURCE)
+        tracks = parse_aircraft_snapshot(
+            snapshot, received_at=now, source=SOURCE, mil_ranges=mil_ranges
+        )
         live_ids = {t.id for t in tracks}
         last_record_at: datetime | None = None
         for track in tracks:
@@ -368,6 +372,7 @@ async def run_local_adsb(
     source = ReadsbSource(cfg.local_adsb_source, timeout_s=cfg.local_adsb_timeout_s)
     resolved_poll = poll_s if poll_s is not None else cfg.local_adsb_poll_s
     resolved_throttle = throttle_s if throttle_s is not None else cfg.local_adsb_throttle_s
+    mil_ranges = parse_ranges(cfg.mil_icao_blocks)
     log.info("local ADS-B adapter -> %s", source.location)
     backoff = INITIAL_BACKOFF_S
     while True:
@@ -375,7 +380,10 @@ async def run_local_adsb(
             async with connect(cfg, identifier="aether-local-adsb") as bus:
                 backoff = INITIAL_BACKOFF_S  # reset once connected
                 async for record in local_adsb_records(
-                    source, poll_s=resolved_poll, throttle_s=resolved_throttle
+                    source,
+                    poll_s=resolved_poll,
+                    throttle_s=resolved_throttle,
+                    mil_ranges=mil_ranges,
                 ):
                     await bus.publish_record(record)
                 return  # generator exhausted (only on cancellation in practice)

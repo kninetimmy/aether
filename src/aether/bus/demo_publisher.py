@@ -16,8 +16,10 @@ nothing transmits):
   them): one fused track, two contributors (FUSION-FR-001/002/003/005).
 * ``demo02`` — local for the first few ticks then silent while network continues:
   the fused track keeps moving and flips to network provenance (FUSION-FR-004).
-* ``demo03`` — local only (``locally_received=True``).
-* ``demo04`` — network only (``locally_received=False``).
+* ``demo03`` — local only (``locally_received=True``), classified military on a
+  provider-DB basis (PRD §31.4 "military classification examples"; §11.5).
+* ``demo04`` — network only (``locally_received=False``), classified military on an
+  ICAO address-block basis — the two §11.5 classification bases side by side.
 
 Run standalone against a broker::
 
@@ -36,6 +38,7 @@ from aether.schema.geometry import Point, Polygon
 from aether.schema.provenance import Provenance
 from aether.schema.records import (
     AlertRecord,
+    Classification,
     EventRecord,
     GeoFeatureRecord,
     Record,
@@ -75,11 +78,18 @@ def _orbit(center: tuple[float, float], heading: float, radius: float = 0.1) -> 
     return Point(coordinates=[lon, lat, 3000.0])
 
 
-def _local_leg(key: str, now: datetime, heading: float) -> TrackRecord:
+def _local_leg(
+    key: str,
+    now: datetime,
+    heading: float,
+    *,
+    classification: Classification | None = None,
+) -> TrackRecord:
     """A LOCAL (own-antenna) observation: position + heading, but NO speed/label.
 
     Omitting speed and label lets the network leg *fill* those fields while the
-    local leg still wins position (FUSION-FR-002/003).
+    local leg still wins position (FUSION-FR-002/003). ``classification`` is set for
+    the military-example aircraft (PRD §31.4).
     """
     return TrackRecord(
         id=f"{_SOURCE}:{key}",
@@ -93,11 +103,19 @@ def _local_leg(key: str, now: datetime, heading: float) -> TrackRecord:
         altitude_m=3000.0,
         heading_deg=heading,
         locally_received=True,
+        classification=classification,
+        tags=["military"] if classification is not None else [],
         provenance=[Provenance(source=_SOURCE, observed_at=now, received_at=now, local_rf=True)],
     )
 
 
-def _net_leg(key: str, now: datetime, heading: float) -> TrackRecord:
+def _net_leg(
+    key: str,
+    now: datetime,
+    heading: float,
+    *,
+    classification: Classification | None = None,
+) -> TrackRecord:
     """A NETWORK (Internet feed) observation: slightly offset position, WITH speed + label."""
     net_geom = _orbit(_AIRCRAFT_CENTERS[key], heading, radius=0.1005)
     return TrackRecord(
@@ -114,10 +132,23 @@ def _net_leg(key: str, now: datetime, heading: float) -> TrackRecord:
         speed_mps=120.0,
         heading_deg=heading,
         locally_received=False,
+        classification=classification,
+        tags=["military"] if classification is not None else [],
         provenance=[
             Provenance(source=_SOURCE_NET, observed_at=now, received_at=now, local_rf=False)
         ],
     )
+
+
+#: Military-classification examples for the demo (PRD §31.4): demo03 reported by a
+#: provider DB flag, demo04 inferred from an ICAO address block. Confidence stays
+#: below "high" and language hedged — classification is never authoritative (§11.5).
+_DEMO03_CLASSIFICATION = Classification(
+    military=True, basis="provider", confidence="medium", note="provider database flag"
+)
+_DEMO04_CLASSIFICATION = Classification(
+    military=True, basis="address_block", confidence="low", note="ICAO address block"
+)
 
 
 async def demo_records(*, interval_s: float = 1.0) -> AsyncIterator[Record]:
@@ -191,9 +222,10 @@ async def demo_records(*, interval_s: float = 1.0) -> AsyncIterator[Record]:
             yield _local_leg("demo02", now, heading)
         yield _net_leg("demo02", now, heading)
 
-        # demo03: local only. demo04: network only.
-        yield _local_leg("demo03", now, heading)
-        yield _net_leg("demo04", now, heading)
+        # demo03: local only, military (provider basis). demo04: network only,
+        # military (address-block basis) — the two §11.5 bases on the map at once.
+        yield _local_leg("demo03", now, heading, classification=_DEMO03_CLASSIFICATION)
+        yield _net_leg("demo04", now, heading, classification=_DEMO04_CLASSIFICATION)
 
         if tick % 5 == 0:
             yield EventRecord(

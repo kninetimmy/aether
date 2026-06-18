@@ -8,6 +8,7 @@
 
 import type {
   AnyRecord,
+  Classification,
   FeatureType,
   GeoFeatureRecord,
   Severity,
@@ -143,4 +144,37 @@ const SEVERITY_COLOR: Record<Severity, string> = {
 
 export function severityColor(severity: Severity): string {
   return SEVERITY_COLOR[severity] ?? "#9aa6b2";
+}
+
+// --- Military classification badge (PRD §11.5) -----------------------------
+// Honest labeling: a track is shown as military ONLY on a provider-DB flag or an
+// ICAO address-block match (never a movement/callsign heuristic — MIL-FR-004), and
+// the language is deliberately hedged because no basis is authoritative
+// (MIL-FR-005). The badge is the centralized presentation for that — the list/map
+// never builds the string itself.
+
+const MIL_BASIS_LABEL: Record<Classification["basis"], string> = {
+  provider: "provider database flag",
+  address_block: "ICAO address-block match",
+  both: "provider flag + address-block match",
+  unknown: "unspecified basis",
+};
+
+export interface MilitaryBadge {
+  /** Short, hedged badge text. */
+  text: string;
+  /** Tooltip naming the basis + confidence, with no certainty language. */
+  title: string;
+}
+
+/** Honest military badge for a track, or null when it is not flagged military. */
+export function militaryBadge(
+  classification: Classification | null | undefined,
+): MilitaryBadge | null {
+  if (!classification || classification.military !== true) return null;
+  const basis = MIL_BASIS_LABEL[classification.basis] ?? MIL_BASIS_LABEL.unknown;
+  return {
+    text: "MIL?",
+    title: `Reported military — ${basis} (confidence: ${classification.confidence}). Not authoritative.`,
+  };
 }

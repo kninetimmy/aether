@@ -15,6 +15,7 @@ from aether.adapters.adsb_provider import (
     parse_response,
 )
 from aether.adapters.aoi import GeoRegion
+from aether.adapters.mil_classify import parse_ranges
 from aether.schema.validation import dump_record_json, parse_record
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "adsbfi" / "region.json"
@@ -87,14 +88,31 @@ def test_non_icao_address_stripped_and_flagged() -> None:
     assert track.id == "aircraft:icao:abc123"
 
 
-def test_military_dbflags_preserved_but_not_classified_here() -> None:
-    # M3.2 preserves the provider military bit for the later classification slice;
-    # it must not assert a (possibly inferred) classification on its own.
+def test_military_dbflags_classified_provider_basis() -> None:
+    # M3.3: the preserved provider military bit (dbFlags & 1) now classifies the
+    # track on a "provider" basis, with a hedged (sub-"high") confidence (§11.5).
     obs = _obs_by_hex()["ae1234"]
     assert obs.attributes["dbFlags"] == 1
     track = observation_to_track(obs)
-    assert track.classification is None
-    assert "military" not in track.tags
+    assert track.classification is not None
+    assert track.classification.military is True
+    assert track.classification.basis == "provider"
+    assert track.classification.confidence != "high"
+    assert "military" in track.tags
+
+
+def test_address_block_classifies_when_configured() -> None:
+    # An ICAO inside an operator-supplied military block is classified on an
+    # "address_block" basis even with no provider flag (MIL-FR-002).
+    obs = _obs_by_hex()["a1b2c3"]
+    assert obs.attributes["dbFlags"] == 0  # provider present but says NOT military
+    ranges = parse_ranges("a1b200-a1b2ff")
+    track = observation_to_track(obs, mil_ranges=ranges)
+    assert track.classification is not None
+    assert track.classification.basis == "address_block"
+    assert "military" in track.tags
+    # Without the block configured it stays unclassified.
+    assert observation_to_track(obs).classification is None
 
 
 def test_observation_to_track_carries_network_provenance() -> None:

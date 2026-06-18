@@ -28,12 +28,13 @@ import json
 import logging
 import math
 import urllib.request
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
 from aether.adapters.aoi import GeoRegion
+from aether.adapters.mil_classify import IcaoRange, classify_military
 from aether.schema.geometry import Point
 from aether.schema.provenance import Provenance
 from aether.schema.records import TrackRecord
@@ -141,7 +142,7 @@ def _ms_to_dt(value: object) -> datetime | None:
 
 #: adsb.fi/ADSBx-native fields with no first-class schema home, preserved verbatim
 #: under ``attributes`` (PRD §18.1 spirit). ``dbFlags`` carries the provider's
-#: military bit, consumed by the later classification slice (PRD §11.5).
+#: military bit, consumed by :func:`observation_to_track` for the §11.5 classification.
 _PRESERVED_FIELDS = (
     "squawk",
     "emergency",
@@ -295,13 +296,16 @@ def observation_to_track(
     *,
     source: str = SOURCE,
     provider: str = "adsb.fi",
+    mil_ranges: Sequence[IcaoRange] = (),
 ) -> TrackRecord:
     """Build the schema-v2 network :class:`TrackRecord` from an observation.
 
     Network provenance: ``locally_received=False`` and a single ``local_rf=False``
     provenance entry naming the provider, so fusion ranks fresh local fields above
     it but still fills gaps from it (FUSION-FR-002/003) and the operator can always
-    collapse to local-only.
+    collapse to local-only. The provider ``dbFlags`` military bit (preserved under
+    ``attributes``) plus the operator's ``mil_ranges`` drive the §11.5 classification
+    basis — identical logic to the local edge, via the shared classifier.
     """
     tags: list[str] = []
     if obs.emergency:
@@ -312,6 +316,15 @@ def observation_to_track(
         tags.append("non_icao")
     if obs.bad_position:
         tags.append("bad_position")
+
+    classification = classify_military(
+        obs.icao_hex,
+        db_flags=obs.attributes.get("dbFlags"),
+        non_icao=obs.non_icao,
+        ranges=mil_ranges,
+    )
+    if classification is not None:
+        tags.append("military")
 
     return TrackRecord(
         id=obs.track_key,
@@ -328,6 +341,7 @@ def observation_to_track(
         heading_deg=obs.heading_deg,
         vertical_rate_mps=obs.vertical_rate_mps,
         locally_received=False,
+        classification=classification,
         tags=tags,
         attributes=dict(obs.attributes),
         provenance=[
