@@ -108,6 +108,27 @@ The APRS station is **receive-only**: see [`docs/local-aprs-igate.md`](docs/loca
 and the sample [`config/direwolf.conf.example`](config/direwolf.conf.example) for the
 real-radio setup and the no-transmit guardrail.
 
+### Network ADS-B + fusion (no radio, no live API)
+
+The network adapter sweeps the AOI from an open provider (default `adsb.fi`); a
+`fake` provider stands in for the no-hardware path. Run it **alongside** local
+ADS-B and the same airframe seen by both fuses into one track — local RF
+privileged, the Internet feed filling the gaps:
+
+```bash
+# Local ADS-B fake feeder (the local leg) + both adapters; network uses the fake provider.
+python -m aether.adapters.readsb_fake_feeder /tmp/aircraft.json &              # writes a data file only
+AETHER_DEMO_SOURCE=0 \
+    AETHER_LOCAL_ADSB=1 AETHER_LOCAL_ADSB_SOURCE=/tmp/aircraft.json \
+    AETHER_NETWORK_ADSB=1 AETHER_NETWORK_ADSB_PROVIDER=fake \
+    uvicorn aether.backend.main:app --app-dir src
+```
+
+A real deployment sets `AETHER_NETWORK_ADSB_PROVIDER=adsb.fi` and supplies the AOI
+center via `AETHER_NETWORK_ADSB_LAT` / `AETHER_NETWORK_ADSB_LON` (the repo carries
+no station coordinates); a >250 NM `AETHER_NETWORK_ADSB_RADIUS_NM` is tiled into
+provider-compliant requests automatically.
+
 ---
 
 ## Verify

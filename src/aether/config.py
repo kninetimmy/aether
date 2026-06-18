@@ -35,6 +35,27 @@ DEFAULT_LOCAL_APRS_THROTTLE_S = 1.0
 #: Connect timeout for the KISS socket (PRD §17.4 "use timeouts").
 DEFAULT_LOCAL_APRS_TIMEOUT_S = 5.0
 
+#: Network ADS-B provider for Internet fusion (PRD §18.2). ``adsb.fi`` is the
+#: default open provider; ``fake`` selects the in-process no-hardware feeder.
+DEFAULT_NETWORK_ADSB_PROVIDER = "adsb.fi"
+#: AOI center. **Deliberately the null-island placeholder** — the repo carries no
+#: station coordinates (PRD §2/§37); the operator supplies their home position via
+#: ``AETHER_NETWORK_ADSB_LAT``/``_LON``. Left at the default the AOI simply covers
+#: open ocean and finds nothing, which fails *visibly* rather than leaking a location.
+DEFAULT_NETWORK_ADSB_LAT = 0.0
+DEFAULT_NETWORK_ADSB_LON = 0.0
+#: Default AOI radius (NM) — the PRD §16.2 home-station default, tiled below the
+#: provider's per-query cap (PRD §16.4).
+DEFAULT_NETWORK_ADSB_RADIUS_NM = 500.0
+#: How often a full AOI sweep runs (PRD §17.4). Slower than the 1 s local poll: a
+#: network feed lags more, and a tiled sweep is several polite requests.
+DEFAULT_NETWORK_ADSB_POLL_S = 5.0
+#: Minimum spacing between per-tile requests within one sweep — the provider
+#: politeness limit (PRD §17.4, §38 "respect rate limits"). adsb.fi asks ~1 req/s.
+DEFAULT_NETWORK_ADSB_RATE_LIMIT_S = 1.0
+#: Per-request timeout for a provider query (PRD §17.4 "use timeouts").
+DEFAULT_NETWORK_ADSB_TIMEOUT_S = 10.0
+
 
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
@@ -70,6 +91,17 @@ class Settings:
     local_aprs_throttle_s: float = DEFAULT_LOCAL_APRS_THROTTLE_S
     local_aprs_timeout_s: float = DEFAULT_LOCAL_APRS_TIMEOUT_S
 
+    #: Run the network ADS-B adapter alongside the backend. Off by default — opt in
+    #: once an AOI center is set; its records fuse with local ADS-B by ICAO (M3.2).
+    network_adsb: bool = False
+    network_adsb_provider: str = DEFAULT_NETWORK_ADSB_PROVIDER
+    network_adsb_center_lat: float = DEFAULT_NETWORK_ADSB_LAT
+    network_adsb_center_lon: float = DEFAULT_NETWORK_ADSB_LON
+    network_adsb_radius_nm: float = DEFAULT_NETWORK_ADSB_RADIUS_NM
+    network_adsb_poll_s: float = DEFAULT_NETWORK_ADSB_POLL_S
+    network_adsb_rate_limit_s: float = DEFAULT_NETWORK_ADSB_RATE_LIMIT_S
+    network_adsb_timeout_s: float = DEFAULT_NETWORK_ADSB_TIMEOUT_S
+
     @classmethod
     def from_env(cls) -> "Settings":
         return cls(
@@ -95,5 +127,29 @@ class Settings:
             ),
             local_aprs_timeout_s=float(
                 os.environ.get("AETHER_LOCAL_APRS_TIMEOUT_S", DEFAULT_LOCAL_APRS_TIMEOUT_S)
+            ),
+            network_adsb=_env_bool("AETHER_NETWORK_ADSB", False),
+            network_adsb_provider=os.environ.get(
+                "AETHER_NETWORK_ADSB_PROVIDER", DEFAULT_NETWORK_ADSB_PROVIDER
+            ),
+            network_adsb_center_lat=float(
+                os.environ.get("AETHER_NETWORK_ADSB_LAT", DEFAULT_NETWORK_ADSB_LAT)
+            ),
+            network_adsb_center_lon=float(
+                os.environ.get("AETHER_NETWORK_ADSB_LON", DEFAULT_NETWORK_ADSB_LON)
+            ),
+            network_adsb_radius_nm=float(
+                os.environ.get("AETHER_NETWORK_ADSB_RADIUS_NM", DEFAULT_NETWORK_ADSB_RADIUS_NM)
+            ),
+            network_adsb_poll_s=float(
+                os.environ.get("AETHER_NETWORK_ADSB_POLL_S", DEFAULT_NETWORK_ADSB_POLL_S)
+            ),
+            network_adsb_rate_limit_s=float(
+                os.environ.get(
+                    "AETHER_NETWORK_ADSB_RATE_LIMIT_S", DEFAULT_NETWORK_ADSB_RATE_LIMIT_S
+                )
+            ),
+            network_adsb_timeout_s=float(
+                os.environ.get("AETHER_NETWORK_ADSB_TIMEOUT_S", DEFAULT_NETWORK_ADSB_TIMEOUT_S)
             ),
         )
