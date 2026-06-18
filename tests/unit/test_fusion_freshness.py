@@ -55,3 +55,18 @@ def test_window_for_known_source_vs_fallback() -> None:
     # An unknown source falls back to the conservative network-grade window.
     unknown = window_for("some-new-feed", DEFAULT_FRESHNESS, DEFAULT_FRESHNESS_FALLBACK)
     assert unknown == DEFAULT_FRESHNESS_FALLBACK == FreshnessWindow(15.0, 60.0, 120.0)
+
+
+def test_aprs_sources_share_the_minutes_grade_window() -> None:
+    # Both APRS legs (local RF + APRS-IS) get the APRS-mobile window, NOT the 120s
+    # network fallback — a station beaconing every few minutes must stay live
+    # between beacons, and the two legs must coexist long enough to fuse (PRD §15.4).
+    aprs = FreshnessWindow(300.0, 1800.0, 7200.0)
+    assert window_for("local_aprs", DEFAULT_FRESHNESS, DEFAULT_FRESHNESS_FALLBACK) == aprs
+    assert window_for("aprs_is", DEFAULT_FRESHNESS, DEFAULT_FRESHNESS_FALLBACK) == aprs
+    # A 4-minute-old beacon is still live; the network fallback would call it expired.
+    assert classify(240.0, aprs) == "live"
+    assert classify(240.0, DEFAULT_FRESHNESS_FALLBACK) == "expired"
+    # Boundaries: 5 min → stale, 2 h → expired.
+    assert classify(300.0, aprs) == "stale"
+    assert classify(7200.0, aprs) == "expired"

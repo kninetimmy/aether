@@ -1,20 +1,27 @@
-"""Local APRS packet parser (PRD §18.3).
+"""APRS (TNC2) packet parser (PRD §18.3, §18.4).
 
-Pure, hardware-free normalization of decoded APRS traffic — TNC2 monitor lines as
-Dire Wolf emits on its AGW/log output (or as decoded from a KISS AX.25 frame) —
-into schema v2 :class:`~aether.schema.records.TrackRecord` objects. The runner
-that owns the KISS/AGW socket, throttling, source health, and reconnect is a
-separate slice (M2.2b); this module is just the edge mapping so it can be fully
-unit tested against fixture packets with no SDR and no Dire Wolf.
+Pure, hardware-free normalization of decoded APRS traffic — TNC2 monitor lines —
+into schema v2 :class:`~aether.schema.records.TrackRecord` objects. It is the
+*shared* edge mapping for both APRS sources, because both deliver the same TNC2
+``SRC>DEST,PATH:INFO`` line shape: the local adapter (:mod:`aether.adapters.local_aprs`)
+decodes Dire Wolf KISS/AX.25 frames into TNC2 lines, and the APRS-IS display
+adapter (:mod:`aether.adapters.aprs_is`, M3.4) reads TNC2 lines straight off the
+APRS-IS socket. Keeping one parser avoids two APRS decoders drifting apart and
+guarantees both sources mint the *same* identity key, which is what lets fusion
+collapse them. The module is pure so it unit-tests against fixture packets with no
+SDR, no Dire Wolf, and no network.
 
-This is the operator's *own* 144.39 MHz antenna, so every record is tagged
-``locally_received=True`` with a ``local_rf=True`` provenance entry — the
-load-bearing distinction the COP makes between "my radio heard this" and "an
-Internet feed reported it" (PRD §8.2). Identity follows PRD §15.1: a transmitting
-station is ``aprs:station:<CALLSIGN-SSID>`` and an object/item is
-``aprs:object:<NAME>``, set as both ``id`` and ``correlation_key`` so an APRS-IS
-observation of the same identity fuses onto it in M3 (PRD §15.3) rather than
-appearing twice.
+The ``local_rf`` flag is the one thing that differs between the two callers and
+the load-bearing distinction the COP makes between "my radio heard this" and "an
+Internet feed reported it" (PRD §8.2): the local adapter parses with the default
+``local_rf=True`` (the operator's *own* 144.39 MHz antenna), so every record is
+tagged ``locally_received=True`` with a ``local_rf=True`` provenance entry; the
+APRS-IS adapter passes ``local_rf=False`` so its observations are network-only
+until fused with a local one. Identity follows PRD §15.1: a transmitting station
+is ``aprs:station:<CALLSIGN-SSID>`` and an object/item is ``aprs:object:<NAME>``,
+set as both ``id`` and ``correlation_key`` — independent of the source — so a
+local-RF and an APRS-IS observation of the same identity fuse into one track
+(PRD §15.3) rather than appearing twice.
 
 Adapter rules honored (PRD §17.2): source-native units are normalized to SI
 (knots→m/s, feet→m), impossible coordinates drop the geometry while keeping the
@@ -367,11 +374,15 @@ def _build_track(
     position: _Position | None,
     tags: list[str],
     attributes: dict[str, Any],
+    local_rf: bool,
 ) -> TrackRecord:
     """Assemble a :class:`TrackRecord` from common APRS pieces.
 
     Geometry is omitted when there is no position (status, position-less weather);
     the identity is still published so the station appears and later fuses.
+
+    ``local_rf`` sets both ``locally_received`` and the lone provenance entry's
+    ``local_rf`` flag: ``True`` for the local-RF adapter, ``False`` for APRS-IS.
     """
     geometry: Point | None = None
     altitude_m = speed_mps = heading_deg = None
@@ -406,7 +417,7 @@ def _build_track(
         altitude_m=altitude_m,
         speed_mps=speed_mps,
         heading_deg=heading_deg,
-        locally_received=True,
+        locally_received=local_rf,
         tags=tags,
         attributes=attributes,
         provenance=[
@@ -414,7 +425,7 @@ def _build_track(
                 source=source,
                 observed_at=observed_at,
                 received_at=received_at,
-                local_rf=True,
+                local_rf=local_rf,
             )
         ],
     )
@@ -425,6 +436,7 @@ def parse_aprs_packet(
     *,
     received_at: datetime,
     source: str = SOURCE,
+    local_rf: bool = True,
     _depth: int = 0,
 ) -> TrackRecord | None:
     """Normalize one decoded APRS (TNC2) line into a :class:`TrackRecord`.
@@ -432,6 +444,10 @@ def parse_aprs_packet(
     Returns ``None`` when the line is not a frame we decode in this slice (Mic-E,
     telemetry, messages, raw GPS), carries no usable identity, or is malformed.
     A third-party (``}``) frame is unwrapped once and its inner frame parsed.
+
+    ``local_rf`` (default ``True``) flows to the record's ``locally_received`` and
+    provenance ``local_rf``: the local-RF adapter keeps the default; the APRS-IS
+    display adapter passes ``local_rf=False`` so its observations are network-only.
     """
     parsed = _split_tnc2(line)
     if parsed is None:
@@ -442,11 +458,15 @@ def parse_aprs_packet(
 
     data_type = info[0]
 
-    # Third-party traffic: the payload is itself a TNC2 frame. Unwrap once.
+    # Third-party traffic: the payload is itself a TNC2 frame. Unwrap once. The
+    # inner frame keeps the outer frame's provenance class (``local_rf``): if my
+    # antenna heard the relay, I heard the relayed packet locally too.
     if data_type == "}":
         if _depth:
             return None
-        inner = parse_aprs_packet(info[1:], received_at=received_at, source=source, _depth=1)
+        inner = parse_aprs_packet(
+            info[1:], received_at=received_at, source=source, local_rf=local_rf, _depth=1
+        )
         if inner is not None:
             inner.tags.append("third_party")
             inner.attributes["relayed_by"] = source_call
@@ -481,6 +501,7 @@ def parse_aprs_packet(
             position=position,
             tags=tags,
             attributes=base_attrs,
+            local_rf=local_rf,
         )
 
     # --- Item: )NAME!POSITION (name 3–9 chars, delimited by ! live / _ killed)
@@ -504,6 +525,7 @@ def parse_aprs_packet(
             position=position,
             tags=tags,
             attributes=base_attrs,
+            local_rf=local_rf,
         )
 
     # --- Status: >[timestamp]text -------------------------------------------
@@ -520,6 +542,7 @@ def parse_aprs_packet(
             position=None,
             tags=["status"],
             attributes=base_attrs,
+            local_rf=local_rf,
         )
 
     # --- Positionless weather: _MDHM<weather> -------------------------------
@@ -538,6 +561,7 @@ def parse_aprs_packet(
             position=None,
             tags=["weather"],
             attributes=base_attrs,
+            local_rf=local_rf,
         )
 
     # --- Position with/without timestamp ------------------------------------
@@ -562,6 +586,7 @@ def parse_aprs_packet(
         position=position,
         tags=[],
         attributes=base_attrs,
+        local_rf=local_rf,
     )
 
 
@@ -570,16 +595,21 @@ def parse_aprs_lines(
     *,
     received_at: datetime,
     source: str = SOURCE,
+    local_rf: bool = True,
 ) -> list[TrackRecord]:
     """Normalize a batch of decoded APRS lines into tracks.
 
     A malformed individual line is logged and skipped so one bad packet never
-    drops the rest of a batch (PRD §17.2, §37 failure isolation).
+    drops the rest of a batch (PRD §17.2, §37 failure isolation). ``local_rf`` is
+    forwarded to every record (default ``True`` for local RF; APRS-IS passes
+    ``False``).
     """
     tracks: list[TrackRecord] = []
     for line in lines:
         try:
-            track = parse_aprs_packet(line, received_at=received_at, source=source)
+            track = parse_aprs_packet(
+                line, received_at=received_at, source=source, local_rf=local_rf
+            )
         except Exception:  # one bad packet must not drop the rest
             log.warning("skipping malformed APRS packet", exc_info=True)
             continue
