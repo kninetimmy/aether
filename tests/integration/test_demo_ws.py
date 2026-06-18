@@ -70,3 +70,41 @@ def test_ws_track_delta_carries_provenance_and_locality(broker_settings: Setting
         assert track["kind"] == "track"
         assert "locally_received" in track
         assert track["geometry"]["type"] == "Point"
+
+
+def _drain_tracks(ws: object, frames: int) -> dict[str, dict]:
+    """Read ``frames`` deltas, returning the latest track record per id."""
+    by_id: dict[str, dict] = {}
+    last_seq = -1
+    for _ in range(frames):
+        msg = ws.receive_json()  # type: ignore[attr-defined]
+        assert msg["seq"] > last_seq  # monotonic, no gaps on a fresh client
+        last_seq = msg["seq"]
+        if msg["type"] == "track_upsert":
+            by_id[msg["record"]["id"]] = msg["record"]
+    return by_id
+
+
+def test_demo_fusion_appears_as_one_track(broker_settings: Settings) -> None:
+    with _app(broker_settings) as client, client.websocket_connect("/ws/v2") as ws:
+        ws.receive_json()  # snapshot
+        tracks = _drain_tracks(ws, 80)
+
+        # demo01: local + network fuse into one track, two contributors.
+        d01 = tracks["aircraft:icao:demo01"]
+        block = d01["attributes"]["fusion"]
+        assert block["fused_count"] == 2
+        contributors = {c["source"] for c in block["contributors"]}
+        assert contributors == {"demo", "demo-net"}
+        prov = {p["source"] for p in d01["provenance"]}
+        assert prov == {"demo", "demo-net"}
+        # Network fills speed + label; local wins position.
+        assert d01["speed_mps"] == 120.0
+        assert d01["label"] == "DEMO-FUSE"
+
+        # demo03 local-only, demo04 network-only.
+        assert tracks["aircraft:icao:demo03"]["locally_received"] is True
+        assert tracks["aircraft:icao:demo04"]["locally_received"] is False
+        # demo02 survives and renders (its strict LOCAL→NET flip is asserted at the
+        # engine-unit level — 0.05s ticks can't exceed the 60s local-expire window).
+        assert "aircraft:icao:demo02" in tracks

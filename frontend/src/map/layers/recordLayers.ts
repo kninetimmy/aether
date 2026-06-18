@@ -7,6 +7,7 @@ import {
   featurePresentation,
   trackPresentation,
 } from "../presentationRegistry";
+import { fusionMeta } from "../../types/records";
 import type {
   GeoFeatureRecord,
   GeoJSONGeometry,
@@ -26,6 +27,10 @@ export interface MapFeatureProps {
   locallyReceived: boolean;
   predicted: boolean;
   subtype: string;
+  /** Fusion headline source (PRD §8.1); empty when the track isn't fused. */
+  activeSource: string;
+  /** Number of contributing sources (1 when not fused). */
+  fusedCount: number;
 }
 
 export interface MapFeature {
@@ -39,14 +44,21 @@ export interface FeatureCollection {
   features: MapFeature[];
 }
 
-/** Point features for all tracks that currently have a position. */
+/** Point features for tracks that currently have a position.
+ *
+ * Accepts any iterable of tracks, so a caller can pass a provenance-filtered list
+ * (see `visibleTracks`) — a hidden track simply isn't in the iterable, so it
+ * leaves the GeoJSON source entirely (PRD §16.5). Display only; never changes
+ * ingestion.
+ */
 export function trackFeatureCollection(
-  tracks: Map<string, TrackRecord>,
+  tracks: Iterable<TrackRecord>,
 ): FeatureCollection {
   const features: MapFeature[] = [];
-  for (const track of tracks.values()) {
+  for (const track of tracks) {
     if (!track.geometry) continue;
     const p = trackPresentation(track);
+    const meta = fusionMeta(track);
     features.push({
       type: "Feature",
       geometry: track.geometry,
@@ -62,6 +74,8 @@ export function trackFeatureCollection(
         locallyReceived: track.locally_received,
         predicted: track.predicted,
         subtype: track.track_type,
+        activeSource: meta?.active_source ?? "",
+        fusedCount: meta?.fused_count ?? 1,
       },
     });
   }
@@ -90,6 +104,8 @@ export function featureFeatureCollection(
         locallyReceived: false,
         predicted: false,
         subtype: feat.feature_type,
+        activeSource: "",
+        fusedCount: 1,
       },
     });
   }

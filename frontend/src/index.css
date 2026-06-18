@@ -251,6 +251,37 @@ ul {
   font-size: 10px;
   color: #c79bff;
 }
+.fused {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 4px;
+  border-radius: 3px;
+  color: var(--text);
+  background: #33414f;
+  cursor: help;
+}
+
+/* Provenance filter: the flagship collapse-to-local-only control (PRD §8.2). */
+.provenance-filter {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+.provenance-filter button {
+  flex: 1;
+  font-size: 11px;
+  padding: 3px 6px;
+  border: 1px solid #33414f;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.provenance-filter button.active {
+  color: var(--bg);
+  background: var(--text);
+  border-color: var(--text);
+}
 
 .feed {
   display: flex;

@@ -10,6 +10,7 @@ import {
   trackFeatureCollection,
 } from "../../map/layers/recordLayers";
 import { darkStyle } from "../../map/style/darkStyle";
+import { visibleTracks } from "../../state/selectors";
 import { isLayerVisible, useStore } from "../../state/store";
 
 const TRACK_SOURCE = "aether-tracks";
@@ -31,8 +32,14 @@ export function MapView() {
   const tracks = useStore((s) => s.live.tracks);
   const features = useStore((s) => s.live.features);
   const layerVisible = useStore((s) => s.layerVisible);
+  const provenanceFilter = useStore((s) => s.provenanceFilter);
 
-  const trackFc = useMemo(() => trackFeatureCollection(tracks), [tracks]);
+  // Provenance-filtered tracks leave the GeoJSON source entirely when hidden, so
+  // "collapse to local-only" removes them from the map (PRD §16.5). Display only.
+  const trackFc = useMemo(
+    () => trackFeatureCollection(visibleTracks(tracks, provenanceFilter)),
+    [tracks, provenanceFilter],
+  );
   const featureFc = useMemo(() => featureFeatureCollection(features), [features]);
 
   // Initialize the map once.

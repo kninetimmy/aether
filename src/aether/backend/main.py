@@ -15,6 +15,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from typing import Any
 
 import aiomqtt
@@ -33,6 +34,11 @@ log = logging.getLogger(__name__)
 #: Grace period for source tasks to stop on shutdown before they're abandoned.
 SHUTDOWN_GRACE_S = 5.0
 
+#: How often the backend ages out stale fused tracks (PRD §15.4). Independent of
+#: the bus: it surfaces LOCAL→NET handoffs and removes tracks once every
+#: contributor has gone silent, even with no new ingest.
+EXPIRY_INTERVAL_S = 1.0
+
 
 def create_app(*, settings: Settings | None = None, demo_interval_s: float = 1.0) -> FastAPI:
     cfg = settings if settings is not None else Settings.from_env()
@@ -44,7 +50,8 @@ def create_app(*, settings: Settings | None = None, demo_interval_s: float = 1.0
         tasks = [
             asyncio.create_task(
                 run_record_subscriber(cfg, hub.publish, ready=ready, identifier="aether-backend")
-            )
+            ),
+            asyncio.create_task(_run_expiry(hub)),
         ]
         if cfg.demo_source:
             tasks.append(asyncio.create_task(_run_demo(cfg, ready, demo_interval_s)))
@@ -96,6 +103,20 @@ def create_app(*, settings: Settings | None = None, demo_interval_s: float = 1.0
             hub.unregister(queue)
 
     return app
+
+
+async def _run_expiry(hub: Hub) -> None:
+    """Periodically age out stale fused tracks until cancelled.
+
+    Exception-isolated per tick: a transient fusion/expiry error logs and the loop
+    continues rather than wedging the backend (PRD §37 failure isolation).
+    """
+    while True:
+        await asyncio.sleep(EXPIRY_INTERVAL_S)
+        try:
+            hub.expire(datetime.now(UTC))
+        except Exception:  # one bad sweep must not kill the expiry loop
+            log.warning("track expiry sweep failed; continuing", exc_info=True)
 
 
 async def _run_demo(cfg: Settings, ready: asyncio.Event, interval_s: float) -> None:

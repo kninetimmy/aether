@@ -7,21 +7,32 @@ import { create } from "zustand";
 import { WsClient, type ConnectionStatus } from "../api/wsClient";
 import { emptyState, type LiveState } from "./liveState";
 
+/**
+ * Client-side provenance display filter (PRD §16.5 + the flagship "collapse to
+ * local-only" principle, PRD §8.2). DISPLAY ONLY — it never affects ingestion;
+ * the backend still fuses every source.
+ */
+export type ProvenanceFilter = "all" | "local" | "network";
+
 export interface AppState {
   live: LiveState;
   connection: ConnectionStatus;
   /** Layer visibility toggles, keyed by presentation layer id. */
   layerVisible: Record<string, boolean>;
+  /** Provenance display filter; "local" is the collapse-to-local-only view. */
+  provenanceFilter: ProvenanceFilter;
   client: WsClient | null;
   connect: (url?: string) => void;
   disconnect: () => void;
   setLayerVisible: (layer: string, visible: boolean) => void;
+  setProvenanceFilter: (filter: ProvenanceFilter) => void;
 }
 
 export const useStore = create<AppState>((set, get) => ({
   live: emptyState(),
   connection: "closed",
   layerVisible: {},
+  provenanceFilter: "all",
   client: null,
 
   connect: (url?: string) => {
@@ -44,6 +55,8 @@ export const useStore = create<AppState>((set, get) => ({
 
   setLayerVisible: (layer, visible) =>
     set((s) => ({ layerVisible: { ...s.layerVisible, [layer]: visible } })),
+
+  setProvenanceFilter: (provenanceFilter) => set({ provenanceFilter }),
 }));
 
 /** A layer is visible unless explicitly toggled off (default-on). */

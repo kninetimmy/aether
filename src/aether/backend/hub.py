@@ -10,6 +10,7 @@ clients during a broadcast is safe without locks.
 """
 
 import asyncio
+from datetime import UTC, datetime
 from typing import Any
 
 from aether.backend.protocol import delta_message
@@ -50,11 +51,29 @@ class Hub:
         self._clients.discard(queue)
 
     def publish(self, record: Record) -> None:
-        """Apply a record to live state and broadcast the resulting delta."""
-        change = self._state.apply(record)
+        """Apply a record to live state and broadcast the resulting delta.
+
+        The wall clock is read once here, at the I/O edge, and passed into
+        ``apply`` so fusion freshness is measured against real time while the
+        fusion core itself stays clock-free and deterministic (FUSION-FR-007).
+        """
+        now = datetime.now(UTC)
+        change = self._state.apply(record, now)
         message = delta_message(change)
         for queue in self._clients:
             self._enqueue(queue, message)
+
+    def expire(self, now: datetime) -> None:
+        """Age out stale tracks/features and broadcast each resulting delta.
+
+        Driven by a periodic backend task (not the bus), this is what surfaces a
+        fused track's LOCAL→NET handoff and removes tracks once every contributor
+        has gone silent (PRD §15.4, FUSION-FR-004).
+        """
+        for change in self._state.expire(now):
+            message = delta_message(change)
+            for queue in self._clients:
+                self._enqueue(queue, message)
 
     def _enqueue(self, queue: ClientQueue, message: dict[str, Any]) -> None:
         try:
