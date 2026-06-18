@@ -66,6 +66,38 @@ DEFAULT_NETWORK_ADSB_TIMEOUT_S = 10.0
 #: and only the provider ``dbFlags`` bit classifies (MIL-FR-001).
 DEFAULT_MIL_ICAO_BLOCKS = ""
 
+#: APRS-IS display feed for Internet APRS fusion (PRD §18.4). RECEIVE-ONLY: aether
+#: only reads the feed (passcode ``-1`` cannot transmit) — there is no RF path here.
+#: ``rotate.aprs2.net`` is the Tier-2 rotate address (public infrastructure, not a
+#: secret); port 14580 is the user-defined-filter feed port.
+DEFAULT_APRS_IS_HOST = "rotate.aprs2.net"
+DEFAULT_APRS_IS_PORT = 14580
+#: Operator-supplied APRS-IS login. **Callsign is deliberately empty** — the repo
+#: carries no callsign (PRD §2/§37); enable the adapter and set
+#: ``AETHER_APRS_IS_CALLSIGN`` to your own. Enabled + empty fails *visibly* as an
+#: ``offline`` source status, never as the maintainer's identity.
+DEFAULT_APRS_IS_CALLSIGN = ""
+#: ``-1`` = receive-only login (cannot inject packets to APRS-IS). The operator may
+#: set a real passcode, but aether never transmits regardless (PRD §2, §18.4).
+DEFAULT_APRS_IS_PASSCODE = "-1"
+#: AOI center for the server-side range filter. **Null-island placeholder** — the
+#: repo carries no station coordinates (PRD §2/§37); left at the default the filter
+#: covers open ocean and finds nothing, failing visibly rather than leaking a
+#: location (same stance as network ADS-B). Operator supplies via
+#: ``AETHER_APRS_IS_LAT``/``_LON``.
+DEFAULT_APRS_IS_CENTER_LAT = 0.0
+DEFAULT_APRS_IS_CENTER_LON = 0.0
+#: Default AOI radius (NM) — the PRD §16.2 home-station default; converted to km for
+#: the APRS-IS ``r/lat/lon/dist`` range filter at the adapter edge.
+DEFAULT_APRS_IS_RADIUS_NM = 500.0
+#: At most one ordinary update per station per this window (PRD §18.1).
+DEFAULT_APRS_IS_THROTTLE_S = 1.0
+#: Connect timeout for the APRS-IS socket (PRD §17.4 "use timeouts").
+DEFAULT_APRS_IS_TIMEOUT_S = 10.0
+#: Reconnect if no line — not even a ``#`` keepalive (~20 s apart) — arrives within
+#: this window: the stalled-connection guard (PRD §17.3).
+DEFAULT_APRS_IS_STALL_S = 60.0
+
 
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
@@ -116,6 +148,23 @@ class Settings:
     #: the ADS-B edge). Shared by both the local and network ADS-B adapters so they
     #: classify identically (PRD §11.5 MIL-FR-002).
     mil_icao_blocks: str = DEFAULT_MIL_ICAO_BLOCKS
+
+    #: Run the APRS-IS display adapter alongside the backend. Off by default — opt in
+    #: once a callsign is set; its records fuse with local APRS by callsign/object
+    #: identity (M3.4, PRD §18.4). RECEIVE-ONLY: passcode -1 cannot transmit, and the
+    #: per-adapter center/radius mirror the network ADS-B keys (unifying these into a
+    #: single station location is a noted follow-up, kept out of this slice).
+    aprs_is: bool = False
+    aprs_is_host: str = DEFAULT_APRS_IS_HOST
+    aprs_is_port: int = DEFAULT_APRS_IS_PORT
+    aprs_is_callsign: str = DEFAULT_APRS_IS_CALLSIGN
+    aprs_is_passcode: str = DEFAULT_APRS_IS_PASSCODE
+    aprs_is_center_lat: float = DEFAULT_APRS_IS_CENTER_LAT
+    aprs_is_center_lon: float = DEFAULT_APRS_IS_CENTER_LON
+    aprs_is_radius_nm: float = DEFAULT_APRS_IS_RADIUS_NM
+    aprs_is_throttle_s: float = DEFAULT_APRS_IS_THROTTLE_S
+    aprs_is_timeout_s: float = DEFAULT_APRS_IS_TIMEOUT_S
+    aprs_is_stall_s: float = DEFAULT_APRS_IS_STALL_S
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -168,4 +217,27 @@ class Settings:
                 os.environ.get("AETHER_NETWORK_ADSB_TIMEOUT_S", DEFAULT_NETWORK_ADSB_TIMEOUT_S)
             ),
             mil_icao_blocks=os.environ.get("AETHER_MIL_ICAO_BLOCKS", DEFAULT_MIL_ICAO_BLOCKS),
+            aprs_is=_env_bool("AETHER_APRS_IS", False),
+            aprs_is_host=os.environ.get("AETHER_APRS_IS_HOST", DEFAULT_APRS_IS_HOST),
+            aprs_is_port=int(os.environ.get("AETHER_APRS_IS_PORT", DEFAULT_APRS_IS_PORT)),
+            aprs_is_callsign=os.environ.get("AETHER_APRS_IS_CALLSIGN", DEFAULT_APRS_IS_CALLSIGN),
+            aprs_is_passcode=os.environ.get("AETHER_APRS_IS_PASSCODE", DEFAULT_APRS_IS_PASSCODE),
+            aprs_is_center_lat=float(
+                os.environ.get("AETHER_APRS_IS_LAT", DEFAULT_APRS_IS_CENTER_LAT)
+            ),
+            aprs_is_center_lon=float(
+                os.environ.get("AETHER_APRS_IS_LON", DEFAULT_APRS_IS_CENTER_LON)
+            ),
+            aprs_is_radius_nm=float(
+                os.environ.get("AETHER_APRS_IS_RADIUS_NM", DEFAULT_APRS_IS_RADIUS_NM)
+            ),
+            aprs_is_throttle_s=float(
+                os.environ.get("AETHER_APRS_IS_THROTTLE_S", DEFAULT_APRS_IS_THROTTLE_S)
+            ),
+            aprs_is_timeout_s=float(
+                os.environ.get("AETHER_APRS_IS_TIMEOUT_S", DEFAULT_APRS_IS_TIMEOUT_S)
+            ),
+            aprs_is_stall_s=float(
+                os.environ.get("AETHER_APRS_IS_STALL_S", DEFAULT_APRS_IS_STALL_S)
+            ),
         )

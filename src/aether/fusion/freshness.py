@@ -45,11 +45,24 @@ class FreshnessWindow:
 #: ``demo-net`` is the demo's NETWORK leg — both on the network-grade ADS-B
 #: window (live 0-15s / stale 15-60s / expire 120s), looser than local because a
 #: feed batches and lags more than the operator's own antenna (PRD §15.4).
+#:
+#: ``local_aprs`` (Dire Wolf RF) and ``aprs_is`` (the Internet APRS-IS feed) both
+#: get the APRS window (live 0-5min / stale 5-30min / expire 2h, PRD §15.4 "APRS
+#: mobile"). APRS is two-to-three orders of magnitude slower than ADS-B — stations
+#: beacon on the order of minutes, not seconds — so the ADS-B-grade fallback (120s
+#: expire) would drop a station between beacons and rarely let a local and an
+#: APRS-IS observation of the same callsign coexist long enough to fuse. Both legs
+#: share one window (a callsign is just as fresh whoever heard it); ``local_rf``
+#: drives *precedence*, not the window. (The §15.4 "APRS fixed/weather" 24h band
+#: would need a per-track-type window, which this source-name-keyed table
+#: deliberately avoids — a follow-up, not a regression.)
 DEFAULT_FRESHNESS: dict[str, FreshnessWindow] = {
     "local_adsb": FreshnessWindow(5.0, 30.0, 60.0),
     "demo": FreshnessWindow(5.0, 30.0, 60.0),
     "network_adsb": FreshnessWindow(15.0, 60.0, 120.0),
     "demo-net": FreshnessWindow(15.0, 60.0, 120.0),
+    "local_aprs": FreshnessWindow(300.0, 1800.0, 7200.0),
+    "aprs_is": FreshnessWindow(300.0, 1800.0, 7200.0),
 }
 
 #: Conservative window for any source not in the table — treated network-grade so
