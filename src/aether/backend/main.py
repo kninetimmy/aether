@@ -32,6 +32,7 @@ from aether.backend.subscription import default_filter, parse_subscribe
 from aether.bus.client import DEFAULT_RECONNECT_S, connect, run_record_subscriber
 from aether.bus.demo_publisher import run_demo_publisher
 from aether.config import Settings
+from aether.persist.runner import run_persistence
 
 log = logging.getLogger(__name__)
 
@@ -75,6 +76,10 @@ def create_app(*, settings: Settings | None = None, demo_interval_s: float = 1.0
             tasks.append(asyncio.create_task(run_aprs_is(cfg, ready)))
         if cfg.ais:
             tasks.append(asyncio.create_task(run_ais(cfg, ready)))
+        if cfg.persist:
+            # A sibling bus consumer, not a dependency of live state (PRD §5): its own
+            # broker session and queue, so a slow/failed disk never gates serving.
+            tasks.append(asyncio.create_task(run_persistence(cfg)))
         try:
             yield
         finally:

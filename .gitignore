@@ -8,6 +8,11 @@ node_modules/
 frontend/dist/
 *.tsbuildinfo
 
+# SQLite persistence store + WAL sidecars (M4; operator-local, never committed)
+*.db
+*.db-wal
+*.db-shm
+
 # Python
 __pycache__/
 *.py[cod]
