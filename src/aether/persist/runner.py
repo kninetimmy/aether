@@ -16,6 +16,7 @@ import logging
 from aether.bus.client import run_record_subscriber
 from aether.config import Settings
 from aether.persist.database import Database
+from aether.persist.retention import run_retention
 from aether.persist.writer import PersistenceWriter
 
 log = logging.getLogger(__name__)
@@ -29,20 +30,28 @@ async def run_persistence(settings: Settings, ready: asyncio.Event | None = None
     """Open the DB, start the drain task, and persist bus records until cancelled.
 
     ``ready`` (if given) is set once the subscriber is live, for callers that need
-    to publish without racing the subscribe (tests). On shutdown the drain task is
-    cancelled and the connection closed.
+    to publish without racing the subscribe (tests). On shutdown the drain and
+    retention tasks are cancelled and the connection closed.
+
+    The retention manager (PRD §19.4) runs as a sibling task started *after* the
+    schema is migrated here, so its own connection can open with migrations off and
+    never races this opener. Both are siblings of live state (PRD §5): a slow disk
+    or a VACUUM only backs up this writer's queue, never the hub.
     """
     database = Database(settings.db_path)
     await asyncio.to_thread(database.open)
     log.info("persistence open at %s", settings.db_path)
     writer = PersistenceWriter(database, queue_max=settings.persist_queue_max)
     drain = asyncio.create_task(writer.run())
+    retention = asyncio.create_task(run_retention(settings))
     try:
         await run_record_subscriber(
             settings, writer.enqueue, ready=ready, identifier=PERSIST_CLIENT_ID
         )
     finally:
-        drain.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await drain
+        for task in (drain, retention):
+            task.cancel()
+        for task in (drain, retention):
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
         await asyncio.to_thread(database.close)
