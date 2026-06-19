@@ -17,8 +17,9 @@
 2. **Load memory from memhub** (§8): `recall`, `status`, `list_tasks`, then `locate`/`search` — before
    grepping or loading large files. Follow memhub's own server instructions for mid-session routing.
 3. Inspect the repo and **reconcile it against §3 (Current status) and the PRD milestones (§4)**. The repo
-   currently holds the older v1 ADS-B skeleton; the PRD is the target. **Code is ground truth for current
-   state; the PRD is ground truth for intent.** Note any drift in your first message.
+   implements the COP through **M3 (network fusion)**; **M4 (persistence/alerts/history)** is the target.
+   **Code is ground truth for current state; the PRD is ground truth for intent.** Note any drift in your
+   first message.
 4. Take the **next unchecked milestone slice in order** (§4 / PRD §32). Order is deliberate — build one
    tested vertical slice at a time; never implement multiple milestones in one uncontrolled pass.
 5. Before writing code, state: the milestone slice, the files you expect to change, and the exit criteria
@@ -58,15 +59,28 @@ local-only with one filter. Full vision and requirements: **`PRD.md`**.
 
 ## 3. Current status
 
-Built and verified (older **v1** baseline; the COP is **v2**): a working ADS-B vertical slice — `Entity`/
-`Event` v1 schema, `BaseAdapter` (MQTT + reconnect), the readsb SBS adapter (parse/merge/SI/throttle/prune),
-a FastAPI backend with in-memory state + websocket snapshot/upsert/remove, Mosquitto compose, a no-hardware
-fake feeder, and parser tests. The end-to-end path (fake feed → adapter → MQTT → backend → websocket) is
-green.
+Built and verified — milestones **M1 (COP core) → M3 (network fusion)** are complete (PRD §32 exit
+criteria met). Live state is **in-memory only**; SQLite persistence lands in M4. The v1 `Entity`/`Event`
+skeleton has been superseded by schema v2.
 
-**Relative to the PRD:** this is Milestone-0/early-Milestone-1 material. The COP requires **schema v2**
-(`TrackRecord`/`GeoFeatureRecord`/`EventRecord`/alert/status discriminated union — PRD §14), which
-supersedes the v1 `Entity`/`Event`. Treat the v1 skeleton as the migration starting point, not the target.
+- **Schema v2** (PRD §14): the discriminated record union — track / geo-feature / event / alert /
+  source-status — with provenance, `correlation_key`, and observed/received/published timestamps.
+- **M1 — COP core:** MQTT v2 topics; FastAPI live state (`/api/state`, runtime `/api/config`);
+  sequence-numbered websocket `/ws/v2` (snapshot+deltas, gap detection/resync, per-connection `subscribe`
+  filtering); React+Vite+TS MapLibre shell with a centralized presentation registry; in-process demo source.
+- **M2 — Local RF baseline:** readsb `aircraft.json` adapter + emergency-squawk events; Dire Wolf KISS
+  APRS adapter; receive-only iGate config (`config/direwolf.conf.example`, `docs/local-aprs-igate.md`);
+  local badges + source health.
+- **M3 — Network fusion:** network ADS-B (adsb.fi) with 500 NM AOI tiling; APRS-IS display adapter; AIS
+  (AISStream); the fusion engine (local + Internet observations of one identity collapse into a single
+  track by strict identity key, with source precedence and freshness/expiry); military Mode-S
+  classification (provider bit + operator-supplied ICAO blocks); UI display filters + TOI watchlist.
+
+Every source ships a fake/replay feeder, so the full path (adapter → bus → state → websocket → UI) runs
+with tests green and no hardware (PRD §6, §34).
+
+**Next:** M4 — SQLite WAL + migrations introduced **with** their consumers (alert-rule engine, track
+history, replay, geofences). Persistence is new ground here; it must never gate serving live state (§5).
 
 ---
 
