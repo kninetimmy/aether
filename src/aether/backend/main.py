@@ -27,6 +27,7 @@ from aether.adapters.aprs_is import run_aprs_is
 from aether.adapters.local_adsb import run_local_adsb
 from aether.adapters.local_aprs import run_local_aprs
 from aether.adapters.network_adsb import run_network_adsb
+from aether.backend.geofence_api import build_geofence_router
 from aether.backend.hub import Connection, Hub
 from aether.backend.protocol import snapshot_message
 from aether.backend.subscription import default_filter, parse_subscribe
@@ -34,6 +35,7 @@ from aether.bus.client import DEFAULT_RECONNECT_S, connect, run_record_subscribe
 from aether.bus.demo_publisher import run_demo_publisher
 from aether.config import Settings
 from aether.persist.database import ObservationRow, read_track_history
+from aether.persist.geofences import list_geofences
 from aether.persist.runner import run_persistence
 from aether.schema.validation import dump_record
 
@@ -83,6 +85,11 @@ def create_app(*, settings: Settings | None = None, demo_interval_s: float = 1.0
             # A sibling bus consumer, not a dependency of live state (PRD §5): its own
             # broker session and queue, so a slow/failed disk never gates serving.
             tasks.append(asyncio.create_task(run_persistence(cfg)))
+            # Project persisted geofences into live state so reconnecting clients see
+            # them in the first snapshot (PRD §11.1/§21.5). Read-only and
+            # exception-isolated: a missing/locked/corrupt store yields no overlays,
+            # never a failed startup (PRD §5/§37).
+            await _load_geofences(cfg, hub)
         try:
             yield
         finally:
@@ -102,6 +109,7 @@ def create_app(*, settings: Settings | None = None, demo_interval_s: float = 1.0
                 )
 
     app = FastAPI(title="aether COP", version="0.1.0", lifespan=lifespan)
+    app.include_router(build_geofence_router(cfg, hub))
 
     @app.get("/api/health")
     async def health() -> dict[str, Any]:
@@ -260,6 +268,26 @@ def _history_point(row: ObservationRow) -> dict[str, Any]:
         "lat": row.lat,
         "alt_m": row.alt_m,
     }
+
+
+async def _load_geofences(cfg: Settings, hub: Hub) -> None:
+    """Publish every persisted geofence as a live overlay feature (startup, blocking-safe).
+
+    The store read runs in a worker thread and the whole load is exception-isolated:
+    a missing store yields an empty list (handled in :func:`list_geofences`), and a
+    corrupt row or projection error logs and is skipped rather than wedging startup
+    (PRD §5/§37). Idempotent — re-running just re-upserts the same feature ids.
+    """
+    try:
+        geofences = await asyncio.to_thread(list_geofences, cfg.db_path)
+    except Exception:  # corrupt store row etc. — start with no overlays, never crash
+        log.warning("geofence startup load failed; continuing with none", exc_info=True)
+        return
+    for geofence in geofences:
+        try:
+            hub.publish(geofence.to_feature_record())
+        except Exception:
+            log.warning("skipping malformed geofence %s at startup", geofence.id, exc_info=True)
 
 
 async def _ws_send(websocket: WebSocket, conn: Connection) -> None:
