@@ -153,7 +153,10 @@ export function severityColor(severity: Severity): string {
 // (MIL-FR-005). The badge is the centralized presentation for that — the list/map
 // never builds the string itself.
 
-const MIL_BASIS_LABEL: Record<Classification["basis"], string> = {
+// Exported so the military-basis filter control (FilterPanel) reuses the SAME
+// honest, hedged basis labels the badge tooltip uses — one source of truth, no
+// parallel string built in a component (MIL-FR-005).
+export const MIL_BASIS_LABEL: Record<Classification["basis"], string> = {
   provider: "provider database flag",
   address_block: "ICAO address-block match",
   both: "provider flag + address-block match",

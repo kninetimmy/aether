@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { TrackList } from "./TrackList";
 import { emptyState } from "../../state/liveState";
-import { useStore, type ProvenanceFilter } from "../../state/store";
+import { defaultFilters, useStore, type ProvenanceFilter } from "../../state/store";
 import type { TrackRecord } from "../../types/records";
 
 // jsdom client render: zustand's server snapshot is memoized at store creation,
@@ -49,7 +49,8 @@ function track(
 function setTracks(tracks: TrackRecord[], filter: ProvenanceFilter = "all") {
   const live = emptyState();
   live.tracks = new Map(tracks.map((t) => [t.id, t]));
-  useStore.setState({ live, provenanceFilter: filter });
+  // provenance is now one field of the DisplayFilters object (M3.6a).
+  useStore.setState({ live, filters: { ...defaultFilters(), provenance: filter } });
 }
 
 /** Render TrackList against current store state and return its HTML. */
@@ -85,10 +86,10 @@ const FUSED = track("aircraft:icao:demo01", true, {
 
 describe("TrackList", () => {
   beforeEach(() => {
-    useStore.setState({ live: emptyState(), provenanceFilter: "all" });
+    useStore.setState({ live: emptyState(), filters: defaultFilters() });
   });
   afterEach(() => {
-    useStore.setState({ live: emptyState(), provenanceFilter: "all" });
+    useStore.setState({ live: emptyState(), filters: defaultFilters() });
   });
 
   it("shows a contributor badge and LOCAL provenance for a fused track", () => {

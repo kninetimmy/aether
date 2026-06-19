@@ -123,7 +123,43 @@ export interface FusionMeta {
 export function fusionMeta(track: TrackRecord): FusionMeta | undefined {
   const raw = track.attributes?.["fusion"];
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  // A present-but-malformed block (no/wrong-typed `contributors`) must read as
+  // absent, not throw downstream (consumers call .some/.map on contributors).
+  if (!Array.isArray((raw as { contributors?: unknown }).contributors)) return undefined;
   return raw as FusionMeta;
+}
+
+// --- Defensive attribute readers (M3.6a) -----------------------------------
+// Adapters normalize at the edge (PRD §13.2), but the display filters must never
+// assume a key is present: an ACTIVE criterion treats a missing/wrong-typed
+// attribute as "unknown" (no-match) rather than throwing (PRD §37 isolation).
+// AIS keys mirror src/aether/adapters/ais.py: mmsi, vessel_name, destination,
+// ship_type (int code) / ship_type_text, nav_status (int code) / nav_status_text.
+
+/** Read a string attribute defensively; undefined when absent or not a string. */
+export function aisAttr(track: TrackRecord, key: string): string | undefined {
+  const raw = track.attributes?.[key];
+  return typeof raw === "string" ? raw : undefined;
+}
+
+/**
+ * Read an integer-coded attribute defensively (AIS ship_type / nav_status are
+ * raw ITU int codes — the filter keys off the stable code, not the *_text label).
+ * Undefined when absent or not an integer.
+ */
+export function aisIntAttr(track: TrackRecord, key: string): number | undefined {
+  const raw = track.attributes?.[key];
+  return typeof raw === "number" && Number.isInteger(raw) ? raw : undefined;
+}
+
+/**
+ * Age of a track in seconds = now − observed_at. undefined when observed_at is
+ * missing/unparseable so the caller can treat it as "unknown leg" rather than 0.
+ */
+export function trackAgeS(track: TrackRecord, now: number): number | undefined {
+  const t = Date.parse(track.observed_at);
+  if (Number.isNaN(t)) return undefined;
+  return Math.max(0, (now - t) / 1000);
 }
 
 // --- GeoFeature ------------------------------------------------------------

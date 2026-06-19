@@ -11,6 +11,10 @@ import { visibleTracks } from "../../state/selectors";
 import { useStore } from "../../state/store";
 import { fusionMeta, type TrackRecord } from "../../types/records";
 
+// Watchlist membership feeds the watchlistOnly filter; the watchlist slice lands
+// in M3.6c, so until then the chokepoint receives an empty (stable) set.
+const EMPTY_WATCHLIST: Set<string> = new Set();
+
 function fusionTooltip(track: TrackRecord): string | undefined {
   const meta = fusionMeta(track);
   if (!meta) return undefined;
@@ -20,22 +24,31 @@ function fusionTooltip(track: TrackRecord): string | undefined {
 }
 
 export function TrackList() {
-  // Key on the tracks Map + filter, not the whole live object, so the list only
-  // re-sorts when tracks change — not on every alert/event/status frame.
+  // Key on the tracks Map + filters + clock, not the whole live object, so the
+  // list only re-sorts when tracks/filters change (and on the 1s clock tick that
+  // keeps age + live-LOCAL filtering from drifting) — not on every alert/event.
   const trackMap = useStore((s) => s.live.tracks);
-  const filter = useStore((s) => s.provenanceFilter);
+  const filters = useStore((s) => s.filters);
+  const stationCenter = useStore((s) => s.stationCenter);
+  const clock = useStore((s) => s.clock);
 
   const total = trackMap.size;
   const tracks = useMemo(
     () =>
-      visibleTracks(trackMap, filter).sort((a, b) =>
-        (a.label ?? a.id).localeCompare(b.label ?? b.id),
-      ),
-    [trackMap, filter],
+      visibleTracks(trackMap, filters, {
+        now: clock,
+        stationCenter,
+        watchlist: EMPTY_WATCHLIST,
+      }).sort((a, b) => (a.label ?? a.id).localeCompare(b.label ?? b.id)),
+    [trackMap, filters, stationCenter, clock],
   );
 
+  // "N of M" whenever any track is hidden by an active filter (PRD §16.5); plain
+  // "M" when nothing is filtered out so the heading is honest about what's hidden.
   const heading =
-    filter === "all" ? `Tracks (${total})` : `Tracks (${tracks.length} of ${total})`;
+    tracks.length === total
+      ? `Tracks (${total})`
+      : `Tracks (${tracks.length} of ${total})`;
 
   return (
     <section className="panel-section" aria-label="Tracks">

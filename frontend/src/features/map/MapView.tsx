@@ -16,6 +16,10 @@ import { isLayerVisible, useStore } from "../../state/store";
 const TRACK_SOURCE = "aether-tracks";
 const FEATURE_SOURCE = "aether-features";
 
+// Watchlist membership feeds the watchlistOnly filter; the watchlist slice lands
+// in M3.6c, so until then the chokepoint receives an empty (stable) set.
+const EMPTY_WATCHLIST: Set<string> = new Set();
+
 // Default view: continental US-ish. No station coordinates baked in (PRD §5).
 const INITIAL_CENTER: [number, number] = [-98.5, 39.8];
 const INITIAL_ZOOM = 3.2;
@@ -32,13 +36,24 @@ export function MapView() {
   const tracks = useStore((s) => s.live.tracks);
   const features = useStore((s) => s.live.features);
   const layerVisible = useStore((s) => s.layerVisible);
-  const provenanceFilter = useStore((s) => s.provenanceFilter);
+  const filters = useStore((s) => s.filters);
+  const stationCenter = useStore((s) => s.stationCenter);
+  const clock = useStore((s) => s.clock);
 
-  // Provenance-filtered tracks leave the GeoJSON source entirely when hidden, so
-  // "collapse to local-only" removes them from the map (PRD §16.5). Display only.
+  // The display filters (provenance, live-LOCAL, range, age, AIS, …) are applied
+  // through the single visibleTracks chokepoint, so a filtered-out track leaves
+  // the GeoJSON source entirely — it vanishes from the map exactly as it does
+  // from the list (PRD §16.5). Display only; never changes ingestion.
   const trackFc = useMemo(
-    () => trackFeatureCollection(visibleTracks(tracks, provenanceFilter)),
-    [tracks, provenanceFilter],
+    () =>
+      trackFeatureCollection(
+        visibleTracks(tracks, filters, {
+          now: clock,
+          stationCenter,
+          watchlist: EMPTY_WATCHLIST,
+        }),
+      ),
+    [tracks, filters, stationCenter, clock],
   );
   const featureFc = useMemo(() => featureFeatureCollection(features), [features]);
 
