@@ -32,7 +32,7 @@ from typing import Any
 from aether.backend.protocol import delta_message, snapshot_message
 from aether.backend.subscription import ClientFilter
 from aether.schema.records import Record
-from aether.state.live import LiveState, StateChange
+from aether.state.live import LiveState, StateChange, StateKind
 
 log = logging.getLogger(__name__)
 
@@ -135,6 +135,18 @@ class Hub:
         """
         now = datetime.now(UTC)
         change = self._state.apply(record, now)
+        for conn in self._clients:
+            self._dispatch(conn, change)
+
+    def remove(self, kind: StateKind, id: str) -> None:
+        """Remove a track/feature/alert by id and broadcast the removal.
+
+        Symmetric with :meth:`publish` for records the backend mutates directly
+        rather than receiving over the bus — e.g. an operator deleting a geofence
+        feature via the REST API. The Hub force-forwards the remove to every client
+        that was sent the id (so no ghost overlay is stranded, PRD §22.4).
+        """
+        change = self._state.remove(kind, id)
         for conn in self._clients:
             self._dispatch(conn, change)
 

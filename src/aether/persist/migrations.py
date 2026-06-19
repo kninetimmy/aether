@@ -54,6 +54,27 @@ MIGRATIONS: tuple[Migration, ...] = (
             "CREATE INDEX ix_observations_observed ON observations (observed_at)",
         ),
     ),
+    Migration(
+        version=2,
+        name="geofences",
+        statements=(
+            # Operator-config geofences (PRD §19.3, §11.1 COP-FR-008). Low-volume,
+            # CRUD-managed via the API — distinct from the high-rate observation
+            # stream. ``payload`` holds the full geofence JSON (authoritative shape);
+            # the flattened columns back listing/ordering without parsing every row.
+            """
+            CREATE TABLE geofences (
+                id          TEXT    PRIMARY KEY,
+                name        TEXT    NOT NULL,
+                enabled     INTEGER NOT NULL,
+                created_at  TEXT    NOT NULL,
+                updated_at  TEXT    NOT NULL,
+                payload     TEXT    NOT NULL
+            )
+            """,
+            "CREATE INDEX ix_geofences_created ON geofences (created_at)",
+        ),
+    ),
 )
 
 
