@@ -5,14 +5,19 @@
 import { useEffect, useState } from "react";
 import { MapView } from "../features/map/MapView";
 import { EventFeed } from "../features/map/EventFeed";
+import { FilterPanel } from "../features/filters/FilterPanel";
 import { LayerControl } from "../features/sources/LayerControl";
 import { SourceHealthPanel } from "../features/sources/SourceHealthPanel";
+import { TOIDetailsPanel } from "../features/toi/TOIDetailsPanel";
 import { TrackList } from "../features/tracks/TrackList";
 import { useStore } from "../state/store";
 
 export function App() {
   const connect = useStore((s) => s.connect);
   const disconnect = useStore((s) => s.disconnect);
+  const tickClock = useStore((s) => s.tickClock);
+  const setStationCenter = useStore((s) => s.setStationCenter);
+  const ageMaxS = useStore((s) => s.filters.ageMaxS);
   const stale = useStore((s) => s.live.stale);
   const seq = useStore((s) => s.live.seq);
 
@@ -24,6 +29,39 @@ export function App() {
     connect();
     return () => disconnect();
   }, [connect, disconnect]);
+
+  // Pull the runtime station center (PRD §5: coordinates are never committed) so
+  // the M3.6a range-from-station filter has an origin. A 0,0 / unconfigured station
+  // comes back as null → the range control stays a disabled no-op.
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/config")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((cfg: { station: { lon: number; lat: number } | null } | null) => {
+        if (cancelled || !cfg) return;
+        setStationCenter(
+          cfg.station ? { lon: cfg.station.lon, lat: cfg.station.lat } : null,
+        );
+      })
+      .catch(() => {
+        // A missing/failed config endpoint must not break the app: leave the
+        // range filter disabled (PRD §37 graceful degradation).
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [setStationCenter]);
+
+  // Drive a 1s store clock tick ONLY while the age filter is active, so the
+  // now−observed_at cutoff doesn't silently drift between WS frames. The
+  // live-LOCAL filter keys off server-computed contributor freshness frozen into
+  // the record, so the client clock can't change its answer — no tick needed for
+  // it, and idle (no age filter) avoids a pointless 1Hz re-filter + map rebuild.
+  useEffect(() => {
+    if (ageMaxS === null) return;
+    const id = setInterval(() => tickClock(), 1000);
+    return () => clearInterval(id);
+  }, [tickClock, ageMaxS]);
 
   return (
     <div className="app">
@@ -44,6 +82,7 @@ export function App() {
           {leftOpen && (
             <div className="panel-scroll">
               <LayerControl />
+              <FilterPanel />
             </div>
           )}
         </aside>
@@ -58,6 +97,7 @@ export function App() {
           </button>
           {rightOpen && (
             <div className="panel-scroll">
+              <TOIDetailsPanel />
               <SourceHealthPanel />
               <TrackList />
             </div>

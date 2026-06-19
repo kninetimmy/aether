@@ -7,6 +7,7 @@ import {
   featurePresentation,
   trackPresentation,
 } from "../presentationRegistry";
+import { isOnWatchlist } from "../../state/selectors";
 import { fusionMeta } from "../../types/records";
 import type {
   GeoFeatureRecord,
@@ -31,6 +32,8 @@ export interface MapFeatureProps {
   activeSource: string;
   /** Number of contributing sources (1 when not fused). */
   fusedCount: number;
+  /** Whether this track is a watchlisted TOI (drives the highlight ring). */
+  isToi: boolean;
 }
 
 export interface MapFeature {
@@ -46,15 +49,21 @@ export interface FeatureCollection {
 
 /** Point features for tracks that currently have a position.
  *
- * Accepts any iterable of tracks, so a caller can pass a provenance-filtered list
+ * Accepts any iterable of tracks, so a caller can pass an ALREADY-filtered list
  * (see `visibleTracks`) — a hidden track simply isn't in the iterable, so it
- * leaves the GeoJSON source entirely (PRD §16.5). Display only; never changes
- * ingestion.
+ * leaves the GeoJSON source entirely (PRD §16.5). Because the TOI highlight ring
+ * reuses this same collection (filtering on `isToi`), a TOI hidden by a
+ * layer/provenance/display filter has NO feature here and therefore CANNOT
+ * reappear as a highlight. The watchlist is passed in (membership via the stable
+ * `isOnWatchlist` predicate) so this stays display-only and store-free.
  */
 export function trackFeatureCollection(
   tracks: Iterable<TrackRecord>,
+  watchlist: Set<string> = new Set(),
 ): FeatureCollection {
   const features: MapFeature[] = [];
+  // Skip the per-track watchlistKey build entirely in the common no-TOI case.
+  const hasToi = watchlist.size > 0;
   for (const track of tracks) {
     if (!track.geometry) continue;
     const p = trackPresentation(track);
@@ -76,6 +85,7 @@ export function trackFeatureCollection(
         subtype: track.track_type,
         activeSource: meta?.active_source ?? "",
         fusedCount: meta?.fused_count ?? 1,
+        isToi: hasToi && isOnWatchlist(track, watchlist),
       },
     });
   }
@@ -106,6 +116,7 @@ export function featureFeatureCollection(
         subtype: feat.feature_type,
         activeSource: "",
         fusedCount: 1,
+        isToi: false,
       },
     });
   }

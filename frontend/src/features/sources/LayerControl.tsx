@@ -47,7 +47,7 @@ export function LayerControl() {
   }, [tracks, features]);
 
   const visibility = useStore((s) => s.layerVisible);
-  const provenanceFilter = useStore((s) => s.provenanceFilter);
+  const provenanceFilter = useStore((s) => s.filters.provenance);
   const setProvenanceFilter = useStore((s) => s.setProvenanceFilter);
 
   return (

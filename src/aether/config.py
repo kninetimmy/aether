@@ -129,6 +129,23 @@ DEFAULT_AIS_THROTTLE_S = 1.0
 DEFAULT_AIS_TIMEOUT_S = 10.0
 
 
+#: Canonical station location (PRD §5/§16.2). The ONE home position the whole app
+#: shares: the default per-connection websocket bbox (PRD §16.3a), the frontend
+#: range-from-station filter origin (served via ``/api/config``), and the per-adapter
+#: AOI centers below, which now all derive from this instead of duplicating their own
+#: ``*_LAT``/``_LON`` keys (resolves the duplication noted in §M3.6 / former
+#: config.py:185-186). **Deliberately the null-island placeholder** — the repo carries
+#: NO station coordinates (PRD §2/§5/§37); the operator supplies their home position
+#: via ``AETHER_STATION_LAT``/``_LON``. Left at 0,0 every consumer degrades VISIBLY:
+#: the ws default bbox becomes UNBOUNDED (never a degenerate zero-area null-island
+#: box), the range filter disables, and the AOI sweeps cover open ocean and find
+#: nothing — failing loudly rather than leaking a location.
+DEFAULT_STATION_LAT = 0.0
+DEFAULT_STATION_LON = 0.0
+#: Default station AOI radius (NM) — the PRD §16.2 home-station default.
+DEFAULT_STATION_RADIUS_NM = 500.0
+
+
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None:
@@ -145,6 +162,14 @@ class Settings:
     #: Run the in-process demo publisher alongside the backend (M1 no-hardware
     #: gate). A real deployment leaves this off and runs source adapters instead.
     demo_source: bool = True
+
+    #: Canonical station location (PRD §5/§16.2). The single home position shared by
+    #: the websocket default bbox, the frontend range filter (via ``/api/config``),
+    #: and every per-adapter AOI center below (which default to it). 0,0 ⇒ unbounded
+    #: ws default + disabled range filter (no committed coordinates, PRD §5).
+    station_lat: float = DEFAULT_STATION_LAT
+    station_lon: float = DEFAULT_STATION_LON
+    station_radius_nm: float = DEFAULT_STATION_RADIUS_NM
 
     #: Run the local ADS-B (`readsb`) adapter alongside the backend. Off by
     #: default — opt in once an `aircraft.json` source is reachable (M2.1).
@@ -181,9 +206,9 @@ class Settings:
 
     #: Run the APRS-IS display adapter alongside the backend. Off by default — opt in
     #: once a callsign is set; its records fuse with local APRS by callsign/object
-    #: identity (M3.4, PRD §18.4). RECEIVE-ONLY: passcode -1 cannot transmit, and the
-    #: per-adapter center/radius mirror the network ADS-B keys (unifying these into a
-    #: single station location is a noted follow-up, kept out of this slice).
+    #: identity (M3.4, PRD §18.4). RECEIVE-ONLY: passcode -1 cannot transmit. The
+    #: per-adapter center now defaults to the canonical ``station_lat``/``_lon``
+    #: (unified in M3.6b); an explicit ``AETHER_APRS_IS_LAT``/``_LON`` still overrides.
     aprs_is: bool = False
     aprs_is_host: str = DEFAULT_APRS_IS_HOST
     aprs_is_port: int = DEFAULT_APRS_IS_PORT
@@ -214,10 +239,21 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
+        # Resolve the canonical station first; the per-adapter AOI centers default
+        # to it (one home position), while still honoring an explicit per-adapter
+        # override for the rare multi-AOI deployment.
+        station_lat = float(os.environ.get("AETHER_STATION_LAT", DEFAULT_STATION_LAT))
+        station_lon = float(os.environ.get("AETHER_STATION_LON", DEFAULT_STATION_LON))
+        station_radius_nm = float(
+            os.environ.get("AETHER_STATION_RADIUS_NM", DEFAULT_STATION_RADIUS_NM)
+        )
         return cls(
             mqtt_host=os.environ.get("AETHER_MQTT_HOST", DEFAULT_MQTT_HOST),
             mqtt_port=int(os.environ.get("AETHER_MQTT_PORT", DEFAULT_MQTT_PORT)),
             demo_source=_env_bool("AETHER_DEMO_SOURCE", True),
+            station_lat=station_lat,
+            station_lon=station_lon,
+            station_radius_nm=station_radius_nm,
             local_adsb=_env_bool("AETHER_LOCAL_ADSB", False),
             local_adsb_source=os.environ.get("AETHER_LOCAL_ADSB_SOURCE", DEFAULT_LOCAL_ADSB_SOURCE),
             local_adsb_poll_s=float(
@@ -242,12 +278,8 @@ class Settings:
             network_adsb_provider=os.environ.get(
                 "AETHER_NETWORK_ADSB_PROVIDER", DEFAULT_NETWORK_ADSB_PROVIDER
             ),
-            network_adsb_center_lat=float(
-                os.environ.get("AETHER_NETWORK_ADSB_LAT", DEFAULT_NETWORK_ADSB_LAT)
-            ),
-            network_adsb_center_lon=float(
-                os.environ.get("AETHER_NETWORK_ADSB_LON", DEFAULT_NETWORK_ADSB_LON)
-            ),
+            network_adsb_center_lat=float(os.environ.get("AETHER_NETWORK_ADSB_LAT", station_lat)),
+            network_adsb_center_lon=float(os.environ.get("AETHER_NETWORK_ADSB_LON", station_lon)),
             network_adsb_radius_nm=float(
                 os.environ.get("AETHER_NETWORK_ADSB_RADIUS_NM", DEFAULT_NETWORK_ADSB_RADIUS_NM)
             ),
@@ -268,12 +300,8 @@ class Settings:
             aprs_is_port=int(os.environ.get("AETHER_APRS_IS_PORT", DEFAULT_APRS_IS_PORT)),
             aprs_is_callsign=os.environ.get("AETHER_APRS_IS_CALLSIGN", DEFAULT_APRS_IS_CALLSIGN),
             aprs_is_passcode=os.environ.get("AETHER_APRS_IS_PASSCODE", DEFAULT_APRS_IS_PASSCODE),
-            aprs_is_center_lat=float(
-                os.environ.get("AETHER_APRS_IS_LAT", DEFAULT_APRS_IS_CENTER_LAT)
-            ),
-            aprs_is_center_lon=float(
-                os.environ.get("AETHER_APRS_IS_LON", DEFAULT_APRS_IS_CENTER_LON)
-            ),
+            aprs_is_center_lat=float(os.environ.get("AETHER_APRS_IS_LAT", station_lat)),
+            aprs_is_center_lon=float(os.environ.get("AETHER_APRS_IS_LON", station_lon)),
             aprs_is_radius_nm=float(
                 os.environ.get("AETHER_APRS_IS_RADIUS_NM", DEFAULT_APRS_IS_RADIUS_NM)
             ),
@@ -292,8 +320,8 @@ class Settings:
             ais_path=os.environ.get("AETHER_AIS_PATH", DEFAULT_AIS_PATH),
             ais_tls=_env_bool("AETHER_AIS_TLS", DEFAULT_AIS_TLS),
             ais_api_key=os.environ.get("AETHER_AIS_API_KEY", DEFAULT_AIS_API_KEY),
-            ais_center_lat=float(os.environ.get("AETHER_AIS_LAT", DEFAULT_AIS_CENTER_LAT)),
-            ais_center_lon=float(os.environ.get("AETHER_AIS_LON", DEFAULT_AIS_CENTER_LON)),
+            ais_center_lat=float(os.environ.get("AETHER_AIS_LAT", station_lat)),
+            ais_center_lon=float(os.environ.get("AETHER_AIS_LON", station_lon)),
             ais_radius_nm=float(os.environ.get("AETHER_AIS_RADIUS_NM", DEFAULT_AIS_RADIUS_NM)),
             ais_throttle_s=float(os.environ.get("AETHER_AIS_THROTTLE_S", DEFAULT_AIS_THROTTLE_S)),
             ais_timeout_s=float(os.environ.get("AETHER_AIS_TIMEOUT_S", DEFAULT_AIS_TIMEOUT_S)),

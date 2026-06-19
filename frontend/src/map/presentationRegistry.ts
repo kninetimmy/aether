@@ -153,7 +153,10 @@ export function severityColor(severity: Severity): string {
 // (MIL-FR-005). The badge is the centralized presentation for that — the list/map
 // never builds the string itself.
 
-const MIL_BASIS_LABEL: Record<Classification["basis"], string> = {
+// Exported so the military-basis filter control (FilterPanel) reuses the SAME
+// honest, hedged basis labels the badge tooltip uses — one source of truth, no
+// parallel string built in a component (MIL-FR-005).
+export const MIL_BASIS_LABEL: Record<Classification["basis"], string> = {
   provider: "provider database flag",
   address_block: "ICAO address-block match",
   both: "provider flag + address-block match",
@@ -165,6 +168,33 @@ export interface MilitaryBadge {
   text: string;
   /** Tooltip naming the basis + confidence, with no certainty language. */
   title: string;
+}
+
+// --- TOI watchlist highlight (PRD §24.6) -----------------------------------
+// Centralized so the map ring and the list/panel badge share one source of truth
+// — components stay dumb and never hardcode the highlight color/width/glyph.
+
+export interface ToiHighlight {
+  /** Ring color (hex) drawn around a watchlisted track. */
+  color: string;
+  /** Ring stroke width (px) for the dedicated tracks-highlight layer. */
+  width: number;
+  /** Ring radius (px); sits just outside the tracks-point circle. */
+  radius: number;
+  /** Star glyph for the list/panel watchlist badge. */
+  badge: string;
+}
+
+const TOI_HIGHLIGHT: ToiHighlight = {
+  color: "#ffd400",
+  width: 2,
+  radius: 9,
+  badge: "★",
+};
+
+/** The single TOI highlight style (ring + badge). */
+export function toiHighlight(): ToiHighlight {
+  return TOI_HIGHLIGHT;
 }
 
 /** Honest military badge for a track, or null when it is not flagged military. */

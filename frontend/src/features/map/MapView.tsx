@@ -4,12 +4,13 @@
 // rotation and sprite symbols arrive with a real basemap in a later milestone.
 
 import maplibregl, { type Map as MlMap } from "maplibre-gl";
-import { useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import {
   featureFeatureCollection,
   trackFeatureCollection,
 } from "../../map/layers/recordLayers";
 import { darkStyle } from "../../map/style/darkStyle";
+import { toiHighlight } from "../../map/presentationRegistry";
 import { visibleTracks } from "../../state/selectors";
 import { isLayerVisible, useStore } from "../../state/store";
 
@@ -32,13 +33,67 @@ export function MapView() {
   const tracks = useStore((s) => s.live.tracks);
   const features = useStore((s) => s.live.features);
   const layerVisible = useStore((s) => s.layerVisible);
-  const provenanceFilter = useStore((s) => s.provenanceFilter);
+  const filters = useStore((s) => s.filters);
+  const stationCenter = useStore((s) => s.stationCenter);
+  const clock = useStore((s) => s.clock);
+  const watchlist = useStore((s) => s.watchlist);
+  const selectTrack = useStore((s) => s.selectTrack);
+  const client = useStore((s) => s.client);
 
-  // Provenance-filtered tracks leave the GeoJSON source entirely when hidden, so
-  // "collapse to local-only" removes them from the map (PRD §16.5). Display only.
+  // The server-side display-stream subscription (M3.6b): the viewport bbox plus
+  // the source/track-type display filters become a debounced `subscribe` frame so
+  // the backend trims the snapshot+delta firehose per-connection (PRD §16.3,
+  // §22.2). The bbox is the map's current bounds; sources/track_types come from
+  // the SAME DisplayFilters the client-side chokepoint reads, so server and client
+  // filtering agree. include_events/alerts stay on (no UI toggle yet).
+  const sendSubscribe = useCallback(() => {
+    const map = mapRef.current;
+    if (!map || !client) return;
+    const b = map.getBounds();
+    const bbox: [number, number, number, number] = [
+      b.getWest(),
+      b.getSouth(),
+      b.getEast(),
+      b.getNorth(),
+    ];
+    client.subscribe({
+      type: "subscribe",
+      bbox,
+      sources: filters.sources ? [...filters.sources] : null,
+      track_types: filters.trackTypes ? [...filters.trackTypes] : null,
+      include_events: true,
+      include_alerts: true,
+    });
+  }, [client, filters.sources, filters.trackTypes]);
+
+  // The map's moveend (registered once) must always call the FRESHEST subscribe
+  // closure, so route it through a ref rather than re-binding listeners.
+  const sendSubscribeRef = useRef(sendSubscribe);
+  sendSubscribeRef.current = sendSubscribe;
+
+  // Re-subscribe whenever the source/track-type filters or the client change (the
+  // viewport path fires from moveend below). Debounced inside WsClient.
+  useEffect(() => {
+    sendSubscribe();
+  }, [sendSubscribe]);
+
+  // The display filters (provenance, live-LOCAL, range, age, AIS, …) are applied
+  // through the single visibleTracks chokepoint, so a filtered-out track leaves
+  // the GeoJSON source entirely — it vanishes from the map exactly as it does
+  // from the list (PRD §16.5). Display only; never changes ingestion. The TOI
+  // highlight ring reads the SAME already-filtered features (filtering on isToi),
+  // so a TOI hidden by any filter cannot reappear as a highlight.
   const trackFc = useMemo(
-    () => trackFeatureCollection(visibleTracks(tracks, provenanceFilter)),
-    [tracks, provenanceFilter],
+    () =>
+      trackFeatureCollection(
+        visibleTracks(tracks, filters, {
+          now: clock,
+          stationCenter,
+          watchlist,
+        }),
+        watchlist,
+      ),
+    [tracks, filters, stationCenter, clock, watchlist],
   );
   const featureFc = useMemo(() => featureFeatureCollection(features), [features]);
 
@@ -108,8 +163,45 @@ export function MapView() {
         },
       });
 
+      // TOI highlight ring — ordered ABOVE tracks-point, reads the SAME (already
+      // filtered) track source and only renders the isToi members, so a TOI
+      // hidden by a layer/provenance/display filter has no feature and cannot
+      // reappear. Styling comes from the centralized presentation registry.
+      const toi = toiHighlight();
+      map.addLayer({
+        id: "tracks-highlight",
+        type: "circle",
+        source: TRACK_SOURCE,
+        filter: ["==", ["get", "isToi"], true],
+        paint: {
+          "circle-radius": toi.radius,
+          "circle-color": "rgba(0,0,0,0)",
+          "circle-stroke-color": toi.color,
+          "circle-stroke-width": toi.width,
+        },
+      });
+
+      // Click a track point → select it for the TOI details panel.
+      map.on("click", "tracks-point", (e) => {
+        const f = e.features?.[0];
+        const id = f?.properties?.["id"];
+        if (typeof id === "string") selectTrack(id);
+      });
+      map.on("mouseenter", "tracks-point", () => {
+        map.getCanvas().style.cursor = "pointer";
+      });
+      map.on("mouseleave", "tracks-point", () => {
+        map.getCanvas().style.cursor = "";
+      });
+
+      // Viewport change → debounced server re-subscribe (M3.6b). Routed through a
+      // ref so this once-registered handler always uses the freshest filters.
+      map.on("moveend", () => sendSubscribeRef.current());
+
       readyRef.current = true;
       pushData();
+      // Initial subscribe now that bounds exist (also re-sent on socket open).
+      sendSubscribeRef.current();
     });
 
     return () => {
@@ -145,12 +237,20 @@ export function MapView() {
     const hidden = Object.keys(layerVisible).filter(
       (l) => !isLayerVisible(state, l),
     );
-    const trackFilter =
+    const layerHidden =
       hidden.length === 0
         ? null
-        : (["!", ["in", ["get", "layer"], ["literal", hidden]]] as never);
-    for (const id of ["tracks-point"]) {
-      if (map.getLayer(id)) map.setFilter(id, trackFilter);
+        : (["!", ["in", ["get", "layer"], ["literal", hidden]]] as const);
+    // tracks-point: hide whole layers toggled off.
+    if (map.getLayer("tracks-point")) {
+      map.setFilter("tracks-point", (layerHidden as never) ?? null);
+    }
+    // tracks-highlight must keep its isToi gate AND honor the SAME layer-visibility
+    // filter, so a TOI on a hidden layer shows no ring (it can't reappear).
+    if (map.getLayer("tracks-highlight")) {
+      const isToi = ["==", ["get", "isToi"], true] as const;
+      const combined = layerHidden ? ["all", isToi, layerHidden] : isToi;
+      map.setFilter("tracks-highlight", combined as never);
     }
   }, [layerVisible]);
 

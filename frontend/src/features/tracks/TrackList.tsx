@@ -6,8 +6,12 @@
 // heard it (PRD §8.1, §11.4). Full detail panel comes with selection later.
 
 import { useMemo } from "react";
-import { militaryBadge, trackPresentation } from "../../map/presentationRegistry";
-import { visibleTracks } from "../../state/selectors";
+import {
+  militaryBadge,
+  toiHighlight,
+  trackPresentation,
+} from "../../map/presentationRegistry";
+import { isOnWatchlist, visibleTracks, watchlistKey } from "../../state/selectors";
 import { useStore } from "../../state/store";
 import { fusionMeta, type TrackRecord } from "../../types/records";
 
@@ -20,22 +24,37 @@ function fusionTooltip(track: TrackRecord): string | undefined {
 }
 
 export function TrackList() {
-  // Key on the tracks Map + filter, not the whole live object, so the list only
-  // re-sorts when tracks change — not on every alert/event/status frame.
+  // Key on the tracks Map + filters + clock, not the whole live object, so the
+  // list only re-sorts when tracks/filters change (and on the 1s clock tick that
+  // keeps age + live-LOCAL filtering from drifting) — not on every alert/event.
   const trackMap = useStore((s) => s.live.tracks);
-  const filter = useStore((s) => s.provenanceFilter);
+  const filters = useStore((s) => s.filters);
+  const stationCenter = useStore((s) => s.stationCenter);
+  const clock = useStore((s) => s.clock);
+  const watchlist = useStore((s) => s.watchlist);
+  const selectedTrackId = useStore((s) => s.selectedTrackId);
+  const selectTrack = useStore((s) => s.selectTrack);
+  const toggleWatchlist = useStore((s) => s.toggleWatchlist);
 
   const total = trackMap.size;
   const tracks = useMemo(
     () =>
-      visibleTracks(trackMap, filter).sort((a, b) =>
-        (a.label ?? a.id).localeCompare(b.label ?? b.id),
-      ),
-    [trackMap, filter],
+      visibleTracks(trackMap, filters, {
+        now: clock,
+        stationCenter,
+        watchlist,
+      }).sort((a, b) => (a.label ?? a.id).localeCompare(b.label ?? b.id)),
+    [trackMap, filters, stationCenter, clock, watchlist],
   );
 
+  const star = toiHighlight().badge;
+
+  // "N of M" whenever any track is hidden by an active filter (PRD §16.5); plain
+  // "M" when nothing is filtered out so the heading is honest about what's hidden.
   const heading =
-    filter === "all" ? `Tracks (${total})` : `Tracks (${tracks.length} of ${total})`;
+    tracks.length === total
+      ? `Tracks (${total})`
+      : `Tracks (${tracks.length} of ${total})`;
 
   return (
     <section className="panel-section" aria-label="Tracks">
@@ -47,8 +66,27 @@ export function TrackList() {
           const meta = fusionMeta(t);
           const fused = meta !== undefined && meta.fused_count > 1;
           const mil = militaryBadge(t.classification);
+          const toi = isOnWatchlist(t, watchlist);
+          const selected = selectedTrackId === t.id;
           return (
-            <li key={t.id} className="track-row">
+            <li
+              key={t.id}
+              className={`track-row${selected ? " selected" : ""}`}
+              aria-current={selected ? "true" : undefined}
+              onClick={() => selectTrack(t.id)}
+            >
+              <button
+                type="button"
+                className={`star${toi ? " on" : ""}`}
+                title={toi ? "Remove from watchlist" : "Add to watchlist"}
+                aria-pressed={toi}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  toggleWatchlist(watchlistKey(t));
+                }}
+              >
+                {star}
+              </button>
               <span className="swatch" style={{ background: p.color }} aria-hidden />
               <span className="track-label">{t.label ?? t.id}</span>
               <span className="track-type">{t.track_type}</span>
