@@ -128,6 +128,14 @@ DEFAULT_AIS_THROTTLE_S = 1.0
 #: is no data-silence stall: a quiet AOI legitimately sends nothing.
 DEFAULT_AIS_TIMEOUT_S = 10.0
 
+#: Persistence store (M4, PRD §19). SQLite path; the WAL sidecars (`-wal`/`-shm`)
+#: sit alongside it. Live state never depends on this store (PRD §5), so it is off
+#: by default and a slow/failed disk only backs up the writer's own queue.
+DEFAULT_DB_PATH = "aether.db"
+#: Bounded persistence write queue (PRD §19.2 "single bounded async write queue");
+#: a full queue drops records rather than back-pressuring the bus.
+DEFAULT_PERSIST_QUEUE_MAX = 10000
+
 
 #: Canonical station location (PRD §5/§16.2). The ONE home position the whole app
 #: shares: the default per-connection websocket bbox (PRD §16.3a), the frontend
@@ -237,6 +245,15 @@ class Settings:
     ais_throttle_s: float = DEFAULT_AIS_THROTTLE_S
     ais_timeout_s: float = DEFAULT_AIS_TIMEOUT_S
 
+    #: Persist fused records to SQLite (M4, PRD §19). Off by default — persistence
+    #: is a *sibling* bus consumer that never gates serving live state (PRD §5).
+    #: Track history is the first consumer; retention/alerts/replay build on the same
+    #: store. ``db_path`` is the SQLite file; ``persist_queue_max`` bounds the in-memory
+    #: write queue so a slow disk drops records instead of back-pressuring the bus.
+    persist: bool = False
+    db_path: str = DEFAULT_DB_PATH
+    persist_queue_max: int = DEFAULT_PERSIST_QUEUE_MAX
+
     @classmethod
     def from_env(cls) -> "Settings":
         # Resolve the canonical station first; the per-adapter AOI centers default
@@ -325,4 +342,9 @@ class Settings:
             ais_radius_nm=float(os.environ.get("AETHER_AIS_RADIUS_NM", DEFAULT_AIS_RADIUS_NM)),
             ais_throttle_s=float(os.environ.get("AETHER_AIS_THROTTLE_S", DEFAULT_AIS_THROTTLE_S)),
             ais_timeout_s=float(os.environ.get("AETHER_AIS_TIMEOUT_S", DEFAULT_AIS_TIMEOUT_S)),
+            persist=_env_bool("AETHER_PERSIST", False),
+            db_path=os.environ.get("AETHER_DB_PATH", DEFAULT_DB_PATH),
+            persist_queue_max=int(
+                os.environ.get("AETHER_PERSIST_QUEUE_MAX", DEFAULT_PERSIST_QUEUE_MAX)
+            ),
         )
