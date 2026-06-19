@@ -20,6 +20,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 
 from aether.persist.database import Database, ObservationRow
+from aether.persist.sampling import SampleGate
 from aether.schema.records import Record, TrackRecord
 from aether.schema.validation import dump_record_json
 
@@ -73,24 +74,41 @@ class PersistenceWriter:
         *,
         queue_max: int = DEFAULT_QUEUE_MAX,
         batch_max: int = DEFAULT_BATCH_MAX,
+        sample_gate: SampleGate | None = None,
         now: Callable[[], datetime] | None = None,
     ) -> None:
         self._database = database
         self._batch_max = batch_max
+        self._sample_gate = sample_gate
         self._now = now or (lambda: datetime.now(UTC))
         self._queue: asyncio.Queue[ObservationRow] = asyncio.Queue(maxsize=queue_max)
         #: Count of records dropped because the queue was full (visible to health).
         self.dropped = 0
+        #: Count of records thinned by the cadence sampling gate (PRD §19.5).
+        #: Distinct from :attr:`dropped`: this is intentional rate-limiting, not
+        #: disk back-pressure loss.
+        self.sampled = 0
 
     def enqueue(self, record: Record) -> None:
         """Synchronous, non-blocking sink for the bus subscriber (PRD §37).
 
-        Converts and enqueues the record; a full queue drops it and bumps
-        :attr:`dropped` rather than awaiting, so ingestion is never back-pressured
-        by the disk.
+        Applies the per-source cadence gate (PRD §19.5), then converts and
+        enqueues the record; a full queue drops it and bumps :attr:`dropped`
+        rather than awaiting, so ingestion is never back-pressured by the disk.
         """
-        row = to_observation_row(record, now=self._now())
-        if row is None:
+        if not isinstance(record, TrackRecord):
+            return  # this slice persists only tracks (see ``to_observation_row``)
+        now = self._now()
+        if self._sample_gate is not None and not self._sample_gate.admit(
+            identity=record.correlation_key or record.id,
+            source=record.source,
+            now=now,
+            high_fidelity="emergency" in record.tags,
+        ):
+            self.sampled += 1
+            return
+        row = to_observation_row(record, now=now)
+        if row is None:  # unreachable for a TrackRecord; keeps the mapper authoritative
             return
         try:
             self._queue.put_nowait(row)
