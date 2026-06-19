@@ -27,8 +27,10 @@ from aether.adapters.aprs_is import run_aprs_is
 from aether.adapters.local_adsb import run_local_adsb
 from aether.adapters.local_aprs import run_local_aprs
 from aether.adapters.network_adsb import run_network_adsb
+from aether.alerts.engine import AlertEngine
 from aether.alerts.templates import default_rule_templates
 from aether.backend.alert_rules_api import build_alert_rules_router
+from aether.backend.alerts_api import build_alerts_router
 from aether.backend.geofence_api import build_geofence_router
 from aether.backend.hub import Connection, Hub
 from aether.backend.protocol import snapshot_message
@@ -36,11 +38,12 @@ from aether.backend.subscription import default_filter, parse_subscribe
 from aether.bus.client import DEFAULT_RECONNECT_S, connect, run_record_subscriber
 from aether.bus.demo_publisher import run_demo_publisher
 from aether.config import Settings
-from aether.persist.alert_rules import seed_alert_rules
+from aether.persist.alert_rules import list_alert_rules, seed_alert_rules
 from aether.persist.database import Database, ObservationRow, read_track_history
 from aether.persist.geofences import list_geofences
 from aether.persist.runner import run_persistence
 from aether.schema.validation import dump_record
+from aether.state.live import StateChange
 
 log = logging.getLogger(__name__)
 
@@ -62,6 +65,19 @@ SUBSCRIBE_MIN_INTERVAL_S = 0.25
 def create_app(*, settings: Settings | None = None, demo_interval_s: float = 1.0) -> FastAPI:
     cfg = settings if settings is not None else Settings.from_env()
     hub = Hub()
+    # The alert engine is a pure observer of live-state changes: it evaluates the
+    # operator's rules against each change and publishes any resulting alerts back
+    # through the hub (PRD §20.3). It is wired unconditionally — with persistence off
+    # there are simply no rules and it is an inert no-op — and reads the wall clock
+    # itself (schedule/quiet-hours/cooldown), like the fusion engine reads it at the
+    # I/O edge.
+    engine = AlertEngine(clock=lambda: datetime.now(UTC))
+
+    def _emit_alerts(change: StateChange) -> None:
+        for alert in engine.evaluate(change):
+            hub.publish(alert)
+
+    hub.add_observer(_emit_alerts)
 
     @contextlib.asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -104,6 +120,11 @@ def create_app(*, settings: Settings | None = None, demo_interval_s: float = 1.0
             # ALERT-FR-008), idempotently and disabled. Write path, so it runs after
             # the schema is ensured; exception-isolated like the geofence load.
             await _seed_alert_rules(cfg)
+            # Load the persisted ruleset into the engine's in-memory copy so it
+            # evaluates from boot (subsequent CRUD edits sync it directly). Seeded
+            # templates ship disabled, so a fresh store loads nothing that fires.
+            # Read-only and exception-isolated like the geofence load (PRD §5/§37).
+            await _load_alert_rules(cfg, engine)
         try:
             yield
         finally:
@@ -124,7 +145,8 @@ def create_app(*, settings: Settings | None = None, demo_interval_s: float = 1.0
 
     app = FastAPI(title="aether COP", version="0.1.0", lifespan=lifespan)
     app.include_router(build_geofence_router(cfg, hub))
-    app.include_router(build_alert_rules_router(cfg))
+    app.include_router(build_alert_rules_router(cfg, hub, engine))
+    app.include_router(build_alerts_router(hub))
 
     @app.get("/api/health")
     async def health() -> dict[str, Any]:
@@ -322,6 +344,24 @@ async def _seed_alert_rules(cfg: Settings) -> None:
         return
     if inserted:
         log.info("seeded %d default alert-rule template(s)", inserted)
+
+
+async def _load_alert_rules(cfg: Settings, engine: AlertEngine) -> None:
+    """Load the persisted ruleset into the engine at startup (blocking-safe).
+
+    The store read runs in a worker thread and the whole load is exception-isolated:
+    a missing/uncreated store yields an empty list (handled in ``list_alert_rules``)
+    and any read error logs and leaves the engine with no rules rather than wedging
+    startup (PRD §5/§37). After this, the CRUD path keeps the engine in sync directly.
+    """
+    try:
+        rules = await asyncio.to_thread(list_alert_rules, cfg.db_path)
+    except Exception:
+        log.warning("alert-rule load failed; engine starts with no rules", exc_info=True)
+        return
+    engine.set_rules(rules)
+    if rules:
+        log.info("loaded %d alert rule(s) into the engine", len(rules))
 
 
 async def _load_geofences(cfg: Settings, hub: Hub) -> None:

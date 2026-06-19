@@ -225,6 +225,14 @@ class LiveState:
         """
         return self._tracks.get(track_id)
 
+    def get_alert(self, alert_id: str) -> AlertRecord | None:
+        """Return the current alert stored under ``alert_id``, or ``None``.
+
+        Backs the alert lifecycle transitions (ack/resolve, PRD §21.4): the id the
+        snapshot/websocket exposes is the same key the alert is stored under.
+        """
+        return self._alerts.get(alert_id)
+
     def snapshot(self) -> Snapshot:
         """Return the full current state at the current sequence number."""
         return Snapshot(
