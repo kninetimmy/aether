@@ -8,6 +8,7 @@ import { EventFeed } from "../features/map/EventFeed";
 import { FilterPanel } from "../features/filters/FilterPanel";
 import { LayerControl } from "../features/sources/LayerControl";
 import { SourceHealthPanel } from "../features/sources/SourceHealthPanel";
+import { TOIDetailsPanel } from "../features/toi/TOIDetailsPanel";
 import { TrackList } from "../features/tracks/TrackList";
 import { useStore } from "../state/store";
 
@@ -73,6 +74,7 @@ export function App() {
           </button>
           {rightOpen && (
             <div className="panel-scroll">
+              <TOIDetailsPanel />
               <SourceHealthPanel />
               <TrackList />
             </div>

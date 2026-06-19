@@ -6,14 +6,14 @@
 // heard it (PRD §8.1, §11.4). Full detail panel comes with selection later.
 
 import { useMemo } from "react";
-import { militaryBadge, trackPresentation } from "../../map/presentationRegistry";
-import { visibleTracks } from "../../state/selectors";
+import {
+  militaryBadge,
+  toiHighlight,
+  trackPresentation,
+} from "../../map/presentationRegistry";
+import { isOnWatchlist, visibleTracks, watchlistKey } from "../../state/selectors";
 import { useStore } from "../../state/store";
 import { fusionMeta, type TrackRecord } from "../../types/records";
-
-// Watchlist membership feeds the watchlistOnly filter; the watchlist slice lands
-// in M3.6c, so until then the chokepoint receives an empty (stable) set.
-const EMPTY_WATCHLIST: Set<string> = new Set();
 
 function fusionTooltip(track: TrackRecord): string | undefined {
   const meta = fusionMeta(track);
@@ -31,6 +31,10 @@ export function TrackList() {
   const filters = useStore((s) => s.filters);
   const stationCenter = useStore((s) => s.stationCenter);
   const clock = useStore((s) => s.clock);
+  const watchlist = useStore((s) => s.watchlist);
+  const selectedTrackId = useStore((s) => s.selectedTrackId);
+  const selectTrack = useStore((s) => s.selectTrack);
+  const toggleWatchlist = useStore((s) => s.toggleWatchlist);
 
   const total = trackMap.size;
   const tracks = useMemo(
@@ -38,10 +42,12 @@ export function TrackList() {
       visibleTracks(trackMap, filters, {
         now: clock,
         stationCenter,
-        watchlist: EMPTY_WATCHLIST,
+        watchlist,
       }).sort((a, b) => (a.label ?? a.id).localeCompare(b.label ?? b.id)),
-    [trackMap, filters, stationCenter, clock],
+    [trackMap, filters, stationCenter, clock, watchlist],
   );
+
+  const star = toiHighlight().badge;
 
   // "N of M" whenever any track is hidden by an active filter (PRD §16.5); plain
   // "M" when nothing is filtered out so the heading is honest about what's hidden.
@@ -60,8 +66,27 @@ export function TrackList() {
           const meta = fusionMeta(t);
           const fused = meta !== undefined && meta.fused_count > 1;
           const mil = militaryBadge(t.classification);
+          const toi = isOnWatchlist(t, watchlist);
+          const selected = selectedTrackId === t.id;
           return (
-            <li key={t.id} className="track-row">
+            <li
+              key={t.id}
+              className={`track-row${selected ? " selected" : ""}`}
+              aria-current={selected ? "true" : undefined}
+              onClick={() => selectTrack(t.id)}
+            >
+              <button
+                type="button"
+                className={`star${toi ? " on" : ""}`}
+                title={toi ? "Remove from watchlist" : "Add to watchlist"}
+                aria-pressed={toi}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  toggleWatchlist(watchlistKey(t));
+                }}
+              >
+                {star}
+              </button>
               <span className="swatch" style={{ background: p.color }} aria-hidden />
               <span className="track-label">{t.label ?? t.id}</span>
               <span className="track-type">{t.track_type}</span>

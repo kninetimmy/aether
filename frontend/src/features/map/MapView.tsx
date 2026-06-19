@@ -10,15 +10,12 @@ import {
   trackFeatureCollection,
 } from "../../map/layers/recordLayers";
 import { darkStyle } from "../../map/style/darkStyle";
+import { toiHighlight } from "../../map/presentationRegistry";
 import { visibleTracks } from "../../state/selectors";
 import { isLayerVisible, useStore } from "../../state/store";
 
 const TRACK_SOURCE = "aether-tracks";
 const FEATURE_SOURCE = "aether-features";
-
-// Watchlist membership feeds the watchlistOnly filter; the watchlist slice lands
-// in M3.6c, so until then the chokepoint receives an empty (stable) set.
-const EMPTY_WATCHLIST: Set<string> = new Set();
 
 // Default view: continental US-ish. No station coordinates baked in (PRD §5).
 const INITIAL_CENTER: [number, number] = [-98.5, 39.8];
@@ -39,21 +36,26 @@ export function MapView() {
   const filters = useStore((s) => s.filters);
   const stationCenter = useStore((s) => s.stationCenter);
   const clock = useStore((s) => s.clock);
+  const watchlist = useStore((s) => s.watchlist);
+  const selectTrack = useStore((s) => s.selectTrack);
 
   // The display filters (provenance, live-LOCAL, range, age, AIS, …) are applied
   // through the single visibleTracks chokepoint, so a filtered-out track leaves
   // the GeoJSON source entirely — it vanishes from the map exactly as it does
-  // from the list (PRD §16.5). Display only; never changes ingestion.
+  // from the list (PRD §16.5). Display only; never changes ingestion. The TOI
+  // highlight ring reads the SAME already-filtered features (filtering on isToi),
+  // so a TOI hidden by any filter cannot reappear as a highlight.
   const trackFc = useMemo(
     () =>
       trackFeatureCollection(
         visibleTracks(tracks, filters, {
           now: clock,
           stationCenter,
-          watchlist: EMPTY_WATCHLIST,
+          watchlist,
         }),
+        watchlist,
       ),
-    [tracks, filters, stationCenter, clock],
+    [tracks, filters, stationCenter, clock, watchlist],
   );
   const featureFc = useMemo(() => featureFeatureCollection(features), [features]);
 
@@ -123,6 +125,37 @@ export function MapView() {
         },
       });
 
+      // TOI highlight ring — ordered ABOVE tracks-point, reads the SAME (already
+      // filtered) track source and only renders the isToi members, so a TOI
+      // hidden by a layer/provenance/display filter has no feature and cannot
+      // reappear. Styling comes from the centralized presentation registry.
+      const toi = toiHighlight();
+      map.addLayer({
+        id: "tracks-highlight",
+        type: "circle",
+        source: TRACK_SOURCE,
+        filter: ["==", ["get", "isToi"], true],
+        paint: {
+          "circle-radius": toi.radius,
+          "circle-color": "rgba(0,0,0,0)",
+          "circle-stroke-color": toi.color,
+          "circle-stroke-width": toi.width,
+        },
+      });
+
+      // Click a track point → select it for the TOI details panel.
+      map.on("click", "tracks-point", (e) => {
+        const f = e.features?.[0];
+        const id = f?.properties?.["id"];
+        if (typeof id === "string") selectTrack(id);
+      });
+      map.on("mouseenter", "tracks-point", () => {
+        map.getCanvas().style.cursor = "pointer";
+      });
+      map.on("mouseleave", "tracks-point", () => {
+        map.getCanvas().style.cursor = "";
+      });
+
       readyRef.current = true;
       pushData();
     });
@@ -160,12 +193,20 @@ export function MapView() {
     const hidden = Object.keys(layerVisible).filter(
       (l) => !isLayerVisible(state, l),
     );
-    const trackFilter =
+    const layerHidden =
       hidden.length === 0
         ? null
-        : (["!", ["in", ["get", "layer"], ["literal", hidden]]] as never);
-    for (const id of ["tracks-point"]) {
-      if (map.getLayer(id)) map.setFilter(id, trackFilter);
+        : (["!", ["in", ["get", "layer"], ["literal", hidden]]] as const);
+    // tracks-point: hide whole layers toggled off.
+    if (map.getLayer("tracks-point")) {
+      map.setFilter("tracks-point", (layerHidden as never) ?? null);
+    }
+    // tracks-highlight must keep its isToi gate AND honor the SAME layer-visibility
+    // filter, so a TOI on a hidden layer shows no ring (it can't reappear).
+    if (map.getLayer("tracks-highlight")) {
+      const isToi = ["==", ["get", "isToi"], true] as const;
+      const combined = layerHidden ? ["all", isToi, layerHidden] : isToi;
+      map.setFilter("tracks-highlight", combined as never);
     }
   }, [layerVisible]);
 

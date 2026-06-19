@@ -170,6 +170,33 @@ export interface MilitaryBadge {
   title: string;
 }
 
+// --- TOI watchlist highlight (PRD §24.6) -----------------------------------
+// Centralized so the map ring and the list/panel badge share one source of truth
+// — components stay dumb and never hardcode the highlight color/width/glyph.
+
+export interface ToiHighlight {
+  /** Ring color (hex) drawn around a watchlisted track. */
+  color: string;
+  /** Ring stroke width (px) for the dedicated tracks-highlight layer. */
+  width: number;
+  /** Ring radius (px); sits just outside the tracks-point circle. */
+  radius: number;
+  /** Star glyph for the list/panel watchlist badge. */
+  badge: string;
+}
+
+const TOI_HIGHLIGHT: ToiHighlight = {
+  color: "#ffd400",
+  width: 2,
+  radius: 9,
+  badge: "★",
+};
+
+/** The single TOI highlight style (ring + badge). */
+export function toiHighlight(): ToiHighlight {
+  return TOI_HIGHLIGHT;
+}
+
 /** Honest military badge for a track, or null when it is not flagged military. */
 export function militaryBadge(
   classification: Classification | null | undefined,

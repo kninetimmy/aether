@@ -272,6 +272,100 @@ ul {
   cursor: help;
 }
 
+/* TOI watchlist (PRD §24.6). The star toggles the stable watchlistKey; the
+   highlight ring color is centralized in presentationRegistry.toiHighlight(). */
+.star {
+  flex: none;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+}
+.star.on {
+  color: #ffd400;
+}
+.track-row {
+  cursor: pointer;
+}
+.track-row.selected {
+  background: var(--panel-2);
+  border-radius: 3px;
+}
+
+.toi-panel h2 {
+  justify-content: space-between;
+}
+.toi-close {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  cursor: pointer;
+}
+.toi-fields {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 10px;
+  margin: 0;
+  font-size: 13px;
+}
+.toi-fields dt {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.toi-fields dd {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.toi-live {
+  color: var(--local);
+  font-weight: 700;
+}
+.toi-lastlocal {
+  color: var(--muted);
+}
+.toi-contributors {
+  margin-top: 10px;
+}
+.toi-contributors h3 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin: 6px 0 4px;
+}
+.toi-contributor {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  padding: 2px 0;
+}
+.toi-contributor-src {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.toi-fresh {
+  font-size: 10px;
+  font-variant: small-caps;
+}
+.toi-fresh-live {
+  color: #5ce6b4;
+}
+.toi-fresh-stale {
+  color: #ffb347;
+}
+.toi-fresh-expired {
+  color: var(--muted);
+}
+
 /* Provenance filter: the flagship collapse-to-local-only control (PRD §8.2). */
 .provenance-filter {
   display: flex;

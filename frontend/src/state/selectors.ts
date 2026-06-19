@@ -247,7 +247,58 @@ export function matchesAprsCallsign(
   return substringMatch(track.label ?? undefined, filters.aprsCallsignLike);
 }
 
-// --- Watchlist (membership wired in M3.6c; predicate is a no-op until then) ---
+// --- Watchlist (TOI; M3.6c) -----------------------------------------------
+// STABLE keying is the whole point: the raw track.id is source-prefixed and
+// ephemeral (it changes on a LOCAL→NET fusion handoff and can differ across a
+// reconnect), so persisting it would lose the highlight exactly when the target
+// matters most. watchlistKey mirrors the backend's fusion identity: prefer the
+// correlation_key the FusionEngine already assigns; otherwise derive a domain key
+// from the track type (matching the adapters' id/correlation_key conventions —
+// readsb `aircraft:icao:<hex>`, ais `ais:vessel:<mmsi>`, aprs the callsign), only
+// falling back to the raw id when no stable identity can be formed.
+
+/** Defensive string attribute read (records.ts' aisAttr, inlined for non-AIS keys). */
+function strAttr(track: TrackRecord, key: string): string | undefined {
+  const raw = track.attributes?.[key];
+  return typeof raw === "string" && raw.length > 0 ? raw : undefined;
+}
+
+/**
+ * A STABLE identity key for a track — what the watchlist persists, NOT the raw
+ * ephemeral track.id. Survives reconnect and LOCAL→NET fusion handoff because the
+ * backend fuses same-identity observations under one correlation_key.
+ */
+export function watchlistKey(track: TrackRecord): string {
+  if (track.correlation_key) return track.correlation_key;
+  switch (track.track_type) {
+    case "aircraft": {
+      const icao = strAttr(track, "icao") ?? strAttr(track, "hex");
+      if (icao) return `aircraft:icao:${icao.toLowerCase()}`;
+      break;
+    }
+    case "vessel": {
+      const mmsi = strAttr(track, "mmsi");
+      if (mmsi) return `mmsi:${mmsi}`;
+      break;
+    }
+    case "aprs_station":
+    case "aprs_object": {
+      if (track.label) return `aprs:${track.label}`;
+      break;
+    }
+    default:
+      break;
+  }
+  return track.id;
+}
+
+/**
+ * Pure membership predicate feeding BOTH the watchlistOnly display filter and the
+ * map/list TOI highlight. Keys off the stable watchlistKey, never the raw id.
+ */
+export function isOnWatchlist(track: TrackRecord, watchlist: Set<string>): boolean {
+  return watchlist.has(watchlistKey(track));
+}
 
 export function matchesWatchlist(
   track: TrackRecord,
@@ -255,9 +306,7 @@ export function matchesWatchlist(
   ctx: FilterCtx,
 ): boolean {
   if (!filters.watchlistOnly) return true;
-  // Stable keying (watchlistKey) lands with the M3.6c watchlist slice; until then
-  // an empty watchlist with watchlistOnly active correctly yields no tracks.
-  return ctx.watchlist.has(track.correlation_key ?? track.id);
+  return isOnWatchlist(track, ctx.watchlist);
 }
 
 // --- Composition: AND only the active predicates --------------------------

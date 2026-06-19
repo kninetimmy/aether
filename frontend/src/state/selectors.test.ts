@@ -10,11 +10,13 @@ import {
   matchesLiveLocal,
   matchesMilitary,
   matchesMilitaryBasis,
+  isOnWatchlist,
   matchesProvenance,
   matchesSource,
   matchesTrackType,
   trackMatchesProvenance,
   visibleTracks,
+  watchlistKey,
   withinAge,
   withinAltitude,
   withinRange,
@@ -457,5 +459,102 @@ describe("fusionMeta", () => {
   it("returns undefined when malformed (non-object)", () => {
     expect(fusionMeta(track("bad", true, { attributes: { fusion: "nope" } }))).toBeUndefined();
     expect(fusionMeta(track("arr", true, { attributes: { fusion: [1, 2] } }))).toBeUndefined();
+  });
+});
+
+describe("watchlistKey (stable, NOT the raw track.id)", () => {
+  it("prefers correlation_key over the ephemeral source-prefixed id", () => {
+    const t = track("net-adsb:aircraft:icao:abc123", true, {
+      correlation_key: "aircraft:icao:abc123",
+    });
+    expect(watchlistKey(t)).toBe("aircraft:icao:abc123");
+    expect(watchlistKey(t)).not.toBe(t.id);
+  });
+
+  it("is STABLE across a LOCAL→NET fusion handoff (same logical target)", () => {
+    // Same aircraft, two legs with different ephemeral source-prefixed ids but the
+    // SAME backend correlation_key — the watchlist must treat them as one target so
+    // the highlight survives the handoff and a reconnect.
+    const localLeg = track("local_adsb:aircraft:icao:abc123", true, {
+      correlation_key: "aircraft:icao:abc123",
+    });
+    const netLeg = track("net-adsb:aircraft:icao:abc123", false, {
+      correlation_key: "aircraft:icao:abc123",
+    });
+    expect(watchlistKey(localLeg)).toBe(watchlistKey(netLeg));
+    expect(watchlistKey(localLeg)).not.toBe(localLeg.id);
+    expect(watchlistKey(netLeg)).not.toBe(netLeg.id);
+  });
+
+  it("derives a domain key by track_type when correlation_key is absent", () => {
+    const ac = track("x:1", true, {
+      correlation_key: null,
+      track_type: "aircraft",
+      attributes: { icao: "ABC123" },
+    });
+    expect(watchlistKey(ac)).toBe("aircraft:icao:abc123");
+
+    const ship = track("x:2", false, {
+      correlation_key: null,
+      track_type: "vessel",
+      attributes: { mmsi: "366000001" },
+    });
+    expect(watchlistKey(ship)).toBe("mmsi:366000001");
+
+    const aprs = track("x:3", true, {
+      correlation_key: null,
+      track_type: "aprs_station",
+      label: "N0CALL-9",
+    });
+    expect(watchlistKey(aprs)).toBe("aprs:N0CALL-9");
+  });
+
+  it("falls back to the raw id only when no stable identity can be formed", () => {
+    const orphan = track("orphan:42", false, {
+      correlation_key: null,
+      track_type: "aircraft",
+      attributes: {},
+    });
+    expect(watchlistKey(orphan)).toBe("orphan:42");
+  });
+});
+
+describe("isOnWatchlist (pure predicate truth table)", () => {
+  const t = track("net-adsb:aircraft:icao:abc123", true, {
+    correlation_key: "aircraft:icao:abc123",
+  });
+
+  it("true when the stable key is on the list, false otherwise", () => {
+    expect(isOnWatchlist(t, new Set(["aircraft:icao:abc123"]))).toBe(true);
+    expect(isOnWatchlist(t, new Set())).toBe(false);
+    // The raw ephemeral id on the list does NOT count — membership is by stable key.
+    expect(isOnWatchlist(t, new Set([t.id]))).toBe(false);
+  });
+});
+
+describe("watchlistOnly filter composition via visibleTracks", () => {
+  const onList = track("net:aircraft:icao:aaa", true, {
+    correlation_key: "aircraft:icao:aaa",
+  });
+  const offList = track("net:aircraft:icao:bbb", true, {
+    correlation_key: "aircraft:icao:bbb",
+  });
+  const tracks = new Map<string, TrackRecord>([
+    [onList.id, onList],
+    [offList.id, offList],
+  ]);
+
+  it("keeps only watchlisted members when watchlistOnly is active", () => {
+    const out = visibleTracks(
+      tracks,
+      f({ watchlistOnly: true }),
+      ctx({ watchlist: new Set(["aircraft:icao:aaa"]) }),
+    );
+    expect(out.map((t) => t.id)).toEqual([onList.id]);
+  });
+
+  it("is a no-op when watchlistOnly is inactive", () => {
+    const out = visibleTracks(tracks, f(), ctx({ watchlist: new Set() }));
+    expect(out.map((t) => t.id).sort()).toEqual([onList.id, offList.id].sort());
   });
 });
