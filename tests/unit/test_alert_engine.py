@@ -23,6 +23,8 @@ from aether.schema.alert_rule import (
     Schedule,
     TimeWindow,
 )
+from aether.schema.geofence import CircleShape, Geofence, GeofenceCreate
+from aether.schema.geometry import Point
 from aether.schema.records import (
     Classification,
     EventRecord,
@@ -97,6 +99,23 @@ def _aircraft(
         locally_received=locally_received,
         classification=classification,
         attributes={"squawk": squawk} if squawk is not None else {},
+    )
+
+
+def _aircraft_at(
+    lon: float, lat: float, *, alt_m: float = 3000.0, id: str = "aircraft:icao:abc"
+) -> TrackRecord:
+    return TrackRecord(
+        id=id,
+        source="local_adsb",
+        observed_at=T0,
+        received_at=T0,
+        published_at=T0,
+        correlation_key=id,
+        track_type="aircraft",
+        geometry=Point(coordinates=[lon, lat, alt_m]),
+        altitude_m=alt_m,
+        locally_received=True,
     )
 
 
@@ -273,13 +292,34 @@ def test_source_offline_transition_fires() -> None:
     assert len(out) == 1 and out[0].subject_id == "local_adsb"
 
 
-def test_contextual_operator_rule_is_skipped() -> None:
+def test_geofence_enter_rule_fires_via_engine() -> None:
     clock = _Clock(T0)
-    rule = _rule(conditions=[AlertCondition(field="geometry", operator="entered_geofence")])
+    rule = _rule(
+        conditions=[AlertCondition(field="geometry", operator="entered_geofence")],
+        geofence_id="gf-ring",
+        transition="enter",
+    )
     engine = _engine(clock, [rule])
-    # Even a record that "exists" must not fire — contextual ops belong to M4.6c, and
-    # the engine must not silently treat an unevaluable rule as matching/non-matching.
-    assert engine.evaluate(_change(_aircraft(squawk="7700"))) == []
+    engine.set_geofences(
+        [
+            Geofence.create(
+                GeofenceCreate(
+                    name="ring", shape=CircleShape(center=[-95.0, 40.0], radius_m=5000.0)
+                ),
+                id="gf-ring",
+                now=T0,
+            )
+        ]
+    )
+    # A track inside the fence fires one open alert (contextual level → enter edge,
+    # driven through the SAME firing machinery as a stateless rule).
+    inside = _aircraft_at(-95.0, 40.0)
+    out = engine.evaluate(_change(inside))
+    assert len(out) == 1 and out[0].state == "open"
+    # Move it well outside → the open alert auto-resolves on the level's closing edge.
+    clock.t = T0 + timedelta(seconds=30)
+    resolved = engine.evaluate(_change(_aircraft_at(-90.0, 40.0)))
+    assert len(resolved) == 1 and resolved[0].state == "resolved"
 
 
 def test_subject_type_mismatch_and_disabled_rule_do_not_fire() -> None:

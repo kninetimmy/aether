@@ -71,7 +71,11 @@ def create_app(*, settings: Settings | None = None, demo_interval_s: float = 1.0
     # there are simply no rules and it is an inert no-op — and reads the wall clock
     # itself (schedule/quiet-hours/cooldown), like the fusion engine reads it at the
     # I/O edge.
-    engine = AlertEngine(clock=lambda: datetime.now(UTC))
+    engine = AlertEngine(
+        clock=lambda: datetime.now(UTC),
+        station_lat=cfg.station_lat,
+        station_lon=cfg.station_lon,
+    )
 
     def _emit_alerts(change: StateChange) -> None:
         for alert in engine.evaluate(change):
@@ -115,7 +119,7 @@ def create_app(*, settings: Settings | None = None, demo_interval_s: float = 1.0
             # them in the first snapshot (PRD §11.1/§21.5). Read-only and
             # exception-isolated: a missing/locked/corrupt store yields no overlays,
             # never a failed startup (PRD §5/§37).
-            await _load_geofences(cfg, hub)
+            await _load_geofences(cfg, hub, engine)
             # Seed the default alert-rule templates into the store (PRD §11.16
             # ALERT-FR-008), idempotently and disabled. Write path, so it runs after
             # the schema is ensured; exception-isolated like the geofence load.
@@ -144,7 +148,7 @@ def create_app(*, settings: Settings | None = None, demo_interval_s: float = 1.0
                 )
 
     app = FastAPI(title="aether COP", version="0.1.0", lifespan=lifespan)
-    app.include_router(build_geofence_router(cfg, hub))
+    app.include_router(build_geofence_router(cfg, hub, engine))
     app.include_router(build_alert_rules_router(cfg, hub, engine))
     app.include_router(build_alerts_router(hub))
 
@@ -364,19 +368,26 @@ async def _load_alert_rules(cfg: Settings, engine: AlertEngine) -> None:
         log.info("loaded %d alert rule(s) into the engine", len(rules))
 
 
-async def _load_geofences(cfg: Settings, hub: Hub) -> None:
-    """Publish every persisted geofence as a live overlay feature (startup, blocking-safe).
+async def _load_geofences(cfg: Settings, hub: Hub, engine: AlertEngine) -> None:
+    """Publish persisted geofences as overlays AND sync them into the engine (startup).
 
-    The store read runs in a worker thread and the whole load is exception-isolated:
-    a missing store yields an empty list (handled in :func:`list_geofences`), and a
-    corrupt row or projection error logs and is skipped rather than wedging startup
-    (PRD §5/§37). Idempotent — re-running just re-upserts the same feature ids.
+    Two consumers of one read: the hub projects each geofence as a live overlay
+    feature (so reconnecting clients see it), and the alert engine's contextual
+    evaluator needs the geofence *shapes* in memory for enter/exit/contains math —
+    synced here exactly like the ruleset, so containment never reads the store on the
+    hot path (PRD §5). Exception-isolated: a missing/corrupt store yields no overlays
+    and an empty geofence set rather than wedging startup (PRD §5/§37). Idempotent —
+    re-running re-upserts the same feature ids and replaces the same geofence set.
     """
     try:
         geofences = await asyncio.to_thread(list_geofences, cfg.db_path)
     except Exception:  # corrupt store row etc. — start with no overlays, never crash
         log.warning("geofence startup load failed; continuing with none", exc_info=True)
         return
+    try:
+        engine.set_geofences(geofences)  # feed contextual containment from boot
+    except Exception:
+        log.warning("syncing geofences into the engine failed; continuing", exc_info=True)
     for geofence in geofences:
         try:
             hub.publish(geofence.to_feature_record())

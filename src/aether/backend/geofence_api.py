@@ -8,6 +8,13 @@ clients as deltas. Store I/O runs in a worker thread (``asyncio.to_thread``) so 
 slow/locked store never blocks the event loop, and CRUD is gated behind
 ``AETHER_PERSIST`` (503 when off) — exactly like the M4.3 history read, since
 geofences live in the same store and live state never depends on it (PRD §5).
+
+The SQLite store is authoritative; the alert engine's contextual evaluator holds an
+*in-memory* mirror of the geofence shapes it needs for enter/exit/contains math, so
+every successful write here also syncs the engine
+(``upsert_geofence``/``remove_geofence``) — keeping containment off the hot-path disk
+read while making a created/moved/deleted fence take effect immediately, exactly the
+way :mod:`aether.backend.alert_rules_api` syncs the ruleset (M4.6c).
 """
 
 from __future__ import annotations
@@ -19,6 +26,7 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException, Response
 
+from aether.alerts.engine import AlertEngine
 from aether.backend.hub import Hub
 from aether.config import Settings
 from aether.persist.geofences import (
@@ -35,8 +43,13 @@ def _new_id() -> str:
     return f"geofence-{uuid.uuid4().hex[:12]}"
 
 
-def build_geofence_router(cfg: Settings, hub: Hub) -> APIRouter:
-    """Build the geofence CRUD router bound to this app's config + hub."""
+def build_geofence_router(cfg: Settings, hub: Hub, engine: AlertEngine) -> APIRouter:
+    """Build the geofence CRUD router bound to this app's config + hub.
+
+    ``engine`` is the in-memory geofence mirror kept in sync with each successful
+    write so contextual containment reflects edits at once without re-reading the
+    store (mirrors how the alert-rules router syncs the ruleset).
+    """
     router = APIRouter(prefix="/api/v2/geofences", tags=["geofences"])
 
     def _require_persist() -> None:
@@ -66,6 +79,7 @@ def build_geofence_router(cfg: Settings, hub: Hub) -> APIRouter:
                 status_code=503, detail="persistence initializing; retry shortly"
             ) from exc
         hub.publish(geofence.to_feature_record())
+        engine.upsert_geofence(geofence)  # sync the contextual mirror (store is authoritative)
         return geofence
 
     @router.get("/{geofence_id}")
@@ -90,6 +104,7 @@ def build_geofence_router(cfg: Settings, hub: Hub) -> APIRouter:
                 status_code=503, detail="persistence initializing; retry shortly"
             ) from exc
         hub.publish(updated.to_feature_record())  # re-project the edited overlay
+        engine.upsert_geofence(updated)  # a move/resize re-evaluates on the next track change
         return updated
 
     @router.delete("/{geofence_id}", status_code=204)
@@ -104,6 +119,7 @@ def build_geofence_router(cfg: Settings, hub: Hub) -> APIRouter:
         if not existed:
             raise HTTPException(status_code=404, detail=f"no geofence {geofence_id!r}")
         hub.remove("feature", geofence_id)  # drop the overlay from every client
+        engine.remove_geofence(geofence_id)  # stop referencing a deleted fence immediately
         return Response(status_code=204)
 
     return router
