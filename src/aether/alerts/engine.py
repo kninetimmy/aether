@@ -26,9 +26,11 @@ ContextualEvaluator` (M4.6c) and fed through the *identical* edge/cooldown/dedup
 auto-resolve path — one firing model, no duplication. The evaluator holds the prior
 per-subject state and an in-memory mirror of the geofence set (synced here exactly
 like the ruleset), so evaluation stays off the hot-path disk and never blocks.
-Notification *delivery* (email/Discord/browser drivers) is a later slice (M4.7): an
-emitted alert records its selected channels as ``pending`` in ``delivery_status`` and
-appears in the dashboard alert centre, which *is* the dashboard channel.
+Notification *delivery* settles each selected channel in ``delivery_status``: an
+emitted alert appears in the dashboard alert centre — which *is* the dashboard
+channel, so that channel is stamped ``delivered`` at creation — while the remaining
+channels start ``pending`` and are resolved off the hot path by the
+:class:`~aether.alerts.notify.NotificationDispatcher` (M4.7).
 
 **Transition semantics** over the boolean level a rule's conditions define for a
 subject:
@@ -452,10 +454,13 @@ class AlertEngine:
     ) -> AlertRecord:
         """Build a fresh ``open`` alert for a rule firing on ``subject``.
 
-        Selected channels start ``pending`` in ``delivery_status`` (the delivery
-        drivers land in M4.7; the dashboard alert centre is the dashboard channel and
-        needs no driver). The three timestamps collapse to ``now`` — an alert is
-        *derived* at evaluation time, not received from a feed.
+        Selected channels start in ``delivery_status`` as ``pending`` — except
+        ``dashboard``, which is the in-app alert centre and is *delivered by the very
+        act of this alert reaching live state*, so it starts ``delivered`` and needs no
+        dispatcher. The remaining channels (browser/email/discord) are settled off the
+        hot path by the :class:`~aether.alerts.notify.NotificationDispatcher` (M4.7).
+        The three timestamps collapse to ``now`` — an alert is *derived* at evaluation
+        time, not received from a feed.
         """
         return AlertRecord(
             id=self._id_factory(),
@@ -470,7 +475,10 @@ class AlertEngine:
             title=rule.name,
             summary=_summary(rule, subject, record),
             triggered_at=now,
-            delivery_status={channel: "pending" for channel in rule.channels},
+            delivery_status={
+                channel: ("delivered" if channel == "dashboard" else "pending")
+                for channel in rule.channels
+            },
         )
 
     def _resolve(self, alert: AlertRecord, now: datetime) -> AlertRecord:

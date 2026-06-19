@@ -28,6 +28,7 @@ from aether.adapters.local_adsb import run_local_adsb
 from aether.adapters.local_aprs import run_local_aprs
 from aether.adapters.network_adsb import run_network_adsb
 from aether.alerts.engine import AlertEngine
+from aether.alerts.notify import ChannelThresholds, NotificationDispatcher
 from aether.alerts.templates import default_rule_templates
 from aether.backend.alert_rules_api import build_alert_rules_router
 from aether.backend.alerts_api import build_alerts_router
@@ -83,6 +84,24 @@ def create_app(*, settings: Settings | None = None, demo_interval_s: float = 1.0
 
     hub.add_observer(_emit_alerts)
 
+    # The notification dispatcher settles each fired alert's per-channel
+    # ``delivery_status`` off the hot path (PRD §20.4): the synchronous observer only
+    # enqueues, while the sibling ``run`` task (started in the lifespan) resolves
+    # browser/dashboard by severity threshold and writes the result back through the
+    # hub. Always wired — with no rules there are no alerts and it is inert; the
+    # server-side email/discord drivers plug into ``drivers=`` in M4.7b. Registered
+    # AFTER ``_emit_alerts`` so it observes the alert that observer publishes.
+    dispatcher = NotificationDispatcher(
+        publish=hub.publish,
+        clock=lambda: datetime.now(UTC),
+        thresholds=ChannelThresholds(
+            browser=cfg.notify_browser_min_severity,
+            email=cfg.notify_email_min_severity,
+            discord=cfg.notify_discord_min_severity,
+        ),
+    )
+    hub.add_observer(dispatcher.observe)
+
     @contextlib.asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         ready = asyncio.Event()
@@ -91,6 +110,9 @@ def create_app(*, settings: Settings | None = None, demo_interval_s: float = 1.0
                 run_record_subscriber(cfg, hub.publish, ready=ready, identifier="aether-backend")
             ),
             asyncio.create_task(_run_expiry(hub)),
+            # Sibling of live state, not a dependency (PRD §5): drains the dispatch
+            # queue and writes settled delivery_status back through the hub.
+            asyncio.create_task(dispatcher.run()),
         ]
         if cfg.demo_source:
             tasks.append(asyncio.create_task(_run_demo(cfg, ready, demo_interval_s)))
