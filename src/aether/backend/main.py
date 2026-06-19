@@ -27,6 +27,8 @@ from aether.adapters.aprs_is import run_aprs_is
 from aether.adapters.local_adsb import run_local_adsb
 from aether.adapters.local_aprs import run_local_aprs
 from aether.adapters.network_adsb import run_network_adsb
+from aether.alerts.templates import default_rule_templates
+from aether.backend.alert_rules_api import build_alert_rules_router
 from aether.backend.geofence_api import build_geofence_router
 from aether.backend.hub import Connection, Hub
 from aether.backend.protocol import snapshot_message
@@ -34,7 +36,8 @@ from aether.backend.subscription import default_filter, parse_subscribe
 from aether.bus.client import DEFAULT_RECONNECT_S, connect, run_record_subscriber
 from aether.bus.demo_publisher import run_demo_publisher
 from aether.config import Settings
-from aether.persist.database import ObservationRow, read_track_history
+from aether.persist.alert_rules import seed_alert_rules
+from aether.persist.database import Database, ObservationRow, read_track_history
 from aether.persist.geofences import list_geofences
 from aether.persist.runner import run_persistence
 from aether.schema.validation import dump_record
@@ -82,6 +85,13 @@ def create_app(*, settings: Settings | None = None, demo_interval_s: float = 1.0
         if cfg.ais:
             tasks.append(asyncio.create_task(run_ais(cfg, ready)))
         if cfg.persist:
+            # Ensure the schema exists *before* the sibling tasks and the seed run:
+            # a short opener applies migrations idempotently (the writer below reopens
+            # an already-migrated store, a no-op). This makes startup seeding
+            # deterministic on a brand-new store instead of racing the writer's async
+            # open. Exception-isolated — a bad path degrades to no persistence rather
+            # than wedging boot (PRD §5/§37).
+            await _ensure_store(cfg)
             # A sibling bus consumer, not a dependency of live state (PRD §5): its own
             # broker session and queue, so a slow/failed disk never gates serving.
             tasks.append(asyncio.create_task(run_persistence(cfg)))
@@ -90,6 +100,10 @@ def create_app(*, settings: Settings | None = None, demo_interval_s: float = 1.0
             # exception-isolated: a missing/locked/corrupt store yields no overlays,
             # never a failed startup (PRD §5/§37).
             await _load_geofences(cfg, hub)
+            # Seed the default alert-rule templates into the store (PRD §11.16
+            # ALERT-FR-008), idempotently and disabled. Write path, so it runs after
+            # the schema is ensured; exception-isolated like the geofence load.
+            await _seed_alert_rules(cfg)
         try:
             yield
         finally:
@@ -110,6 +124,7 @@ def create_app(*, settings: Settings | None = None, demo_interval_s: float = 1.0
 
     app = FastAPI(title="aether COP", version="0.1.0", lifespan=lifespan)
     app.include_router(build_geofence_router(cfg, hub))
+    app.include_router(build_alert_rules_router(cfg))
 
     @app.get("/api/health")
     async def health() -> dict[str, Any]:
@@ -268,6 +283,45 @@ def _history_point(row: ObservationRow) -> dict[str, Any]:
         "lat": row.lat,
         "alt_m": row.alt_m,
     }
+
+
+async def _ensure_store(cfg: Settings) -> None:
+    """Open the store once to apply migrations, then close (startup, blocking-safe).
+
+    Runs in a worker thread and is exception-isolated: an unwritable/corrupt path
+    logs and is skipped so a bad store degrades to no persistence rather than
+    failing boot (PRD §5/§37). Idempotent — :meth:`Database.open` re-runs no applied
+    migration, and the persistence writer reopens the same store harmlessly.
+    """
+    try:
+        await asyncio.to_thread(_open_and_close, cfg.db_path)
+    except Exception:
+        log.warning("store schema init failed; continuing without persistence", exc_info=True)
+
+
+def _open_and_close(db_path: str) -> None:
+    db = Database(db_path)
+    db.open()  # applies migrations
+    db.close()
+
+
+async def _seed_alert_rules(cfg: Settings) -> None:
+    """Seed missing default alert-rule templates into the store (startup, blocking-safe).
+
+    Idempotent and disabled-by-default (PRD §11.16 ALERT-FR-008): only template ids
+    absent from the store are inserted, so an operator's edits survive and a re-seed
+    is a no-op. Exception-isolated — a write error logs and startup continues
+    (PRD §5/§37); the store is already migrated by :func:`_ensure_store`.
+    """
+    try:
+        inserted = await asyncio.to_thread(
+            seed_alert_rules, cfg.db_path, default_rule_templates(datetime.now(UTC))
+        )
+    except Exception:
+        log.warning("alert-rule template seeding failed; continuing", exc_info=True)
+        return
+    if inserted:
+        log.info("seeded %d default alert-rule template(s)", inserted)
 
 
 async def _load_geofences(cfg: Settings, hub: Hub) -> None:

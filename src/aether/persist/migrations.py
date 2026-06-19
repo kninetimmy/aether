@@ -75,6 +75,29 @@ MIGRATIONS: tuple[Migration, ...] = (
             "CREATE INDEX ix_geofences_created ON geofences (created_at)",
         ),
     ),
+    Migration(
+        version=3,
+        name="alert_rules",
+        statements=(
+            # Operator-config alert rules (PRD §20.1, §11.16 ALERT-FR-002). Like
+            # geofences: low-volume, CRUD-managed via the API, distinct from the
+            # high-rate observation stream. ``payload`` holds the full rule JSON
+            # (authoritative shape); the flattened columns back listing/ordering and
+            # cheap severity/enabled filtering without parsing every row.
+            """
+            CREATE TABLE alert_rules (
+                id          TEXT    PRIMARY KEY,
+                name        TEXT    NOT NULL,
+                enabled     INTEGER NOT NULL,
+                severity    TEXT    NOT NULL,
+                created_at  TEXT    NOT NULL,
+                updated_at  TEXT    NOT NULL,
+                payload     TEXT    NOT NULL
+            )
+            """,
+            "CREATE INDEX ix_alert_rules_created ON alert_rules (created_at)",
+        ),
+    ),
 )
 
 
