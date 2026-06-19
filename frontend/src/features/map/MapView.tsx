@@ -1,7 +1,9 @@
-// MapLibre map view (PRD §24.3). Initializes one map with the dark style, keeps
-// two GeoJSON sources (tracks + features) in sync with live state, and applies
-// layer-visibility toggles. Circle/area layers only for the shell — heading
-// rotation and sprite symbols arrive with a real basemap in a later milestone.
+// MapLibre map view (PRD §24.3). Initializes one map with the configured basemap
+// (a hosted dark vector style by default, with an offline fallback — see
+// basemap.ts), keeps two GeoJSON sources (tracks + features) in sync with live
+// state, and applies layer-visibility toggles. Our record overlays render ABOVE
+// the basemap. Circle/area layers only for now — heading rotation and sprite
+// symbols are a later refinement.
 
 import maplibregl, { type Map as MlMap } from "maplibre-gl";
 import { useCallback, useEffect, useMemo, useRef } from "react";
@@ -9,7 +11,12 @@ import {
   featureFeatureCollection,
   trackFeatureCollection,
 } from "../../map/layers/recordLayers";
-import { darkStyle } from "../../map/style/darkStyle";
+import {
+  BASEMAP_ATTRIBUTION,
+  OFFLINE_DARK_STYLE,
+  basemapStyle,
+  usingHostedBasemap,
+} from "../../map/style/basemap";
 import { toiHighlight } from "../../map/presentationRegistry";
 import { visibleTracks } from "../../state/selectors";
 import { isLayerVisible, useStore } from "../../state/store";
@@ -102,109 +109,151 @@ export function MapView() {
     if (!containerRef.current || mapRef.current) return;
     const map = new maplibregl.Map({
       container: containerRef.current,
-      style: darkStyle,
+      style: basemapStyle,
       center: INITIAL_CENTER,
       zoom: INITIAL_ZOOM,
-      attributionControl: false,
+      // Hosted basemaps must show provider attribution (CARTO/OSM terms); the
+      // offline canvas has no external data to attribute.
+      attributionControl: usingHostedBasemap
+        ? { compact: true, customAttribution: BASEMAP_ATTRIBUTION }
+        : false,
     });
     mapRef.current = map;
 
-    map.on("load", () => {
-      // Bail if the component unmounted before the style finished loading —
-      // the cleanup has already removed this map, so touching it would throw.
+    // Add our record sources + layers ABOVE the basemap. Idempotent (every add is
+    // existence-guarded) so it runs both on the initial style load AND again after
+    // a fallback setStyle(), which discards every source/layer the prior style held.
+    const installOverlay = () => {
       if (mapRef.current !== map) return;
-      map.addSource(TRACK_SOURCE, { type: "geojson", data: emptyFc() });
-      map.addSource(FEATURE_SOURCE, { type: "geojson", data: emptyFc() });
+      if (!map.getSource(TRACK_SOURCE))
+        map.addSource(TRACK_SOURCE, { type: "geojson", data: emptyFc() });
+      if (!map.getSource(FEATURE_SOURCE))
+        map.addSource(FEATURE_SOURCE, { type: "geojson", data: emptyFc() });
 
       // Geo-feature areas underneath tracks.
-      map.addLayer({
-        id: "features-fill",
-        type: "fill",
-        source: FEATURE_SOURCE,
-        filter: ["match", ["geometry-type"], ["Polygon", "MultiPolygon"], true, false],
-        paint: { "fill-color": ["get", "color"], "fill-opacity": 0.18 },
-      });
-      map.addLayer({
-        id: "features-outline",
-        type: "line",
-        source: FEATURE_SOURCE,
-        filter: ["match", ["geometry-type"], ["Polygon", "MultiPolygon"], true, false],
-        paint: { "line-color": ["get", "color"], "line-width": 1.5 },
-      });
-      map.addLayer({
-        id: "features-point",
-        type: "circle",
-        source: FEATURE_SOURCE,
-        filter: ["==", ["geometry-type"], "Point"],
-        paint: {
-          "circle-radius": 4,
-          "circle-color": ["get", "color"],
-          "circle-opacity": 0.85,
-        },
-      });
+      if (!map.getLayer("features-fill"))
+        map.addLayer({
+          id: "features-fill",
+          type: "fill",
+          source: FEATURE_SOURCE,
+          filter: ["match", ["geometry-type"], ["Polygon", "MultiPolygon"], true, false],
+          paint: { "fill-color": ["get", "color"], "fill-opacity": 0.18 },
+        });
+      if (!map.getLayer("features-outline"))
+        map.addLayer({
+          id: "features-outline",
+          type: "line",
+          source: FEATURE_SOURCE,
+          filter: ["match", ["geometry-type"], ["Polygon", "MultiPolygon"], true, false],
+          paint: { "line-color": ["get", "color"], "line-width": 1.5 },
+        });
+      if (!map.getLayer("features-point"))
+        map.addLayer({
+          id: "features-point",
+          type: "circle",
+          source: FEATURE_SOURCE,
+          filter: ["==", ["geometry-type"], "Point"],
+          paint: {
+            "circle-radius": 4,
+            "circle-color": ["get", "color"],
+            "circle-opacity": 0.85,
+          },
+        });
 
       // Tracks: outline encodes provenance — solid for local RF, dashed-feel
       // (lighter stroke) for network/predicted. Color is not the only channel.
-      map.addLayer({
-        id: "tracks-point",
-        type: "circle",
-        source: TRACK_SOURCE,
-        paint: {
-          "circle-radius": 5,
-          "circle-color": ["get", "color"],
-          "circle-stroke-color": [
-            "case",
-            ["get", "locallyReceived"],
-            "#ffffff",
-            "#33414f",
-          ],
-          "circle-stroke-width": ["case", ["get", "locallyReceived"], 2, 1],
-          "circle-opacity": ["case", ["get", "predicted"], 0.5, 0.95],
-        },
-      });
+      if (!map.getLayer("tracks-point"))
+        map.addLayer({
+          id: "tracks-point",
+          type: "circle",
+          source: TRACK_SOURCE,
+          paint: {
+            "circle-radius": 5,
+            "circle-color": ["get", "color"],
+            "circle-stroke-color": [
+              "case",
+              ["get", "locallyReceived"],
+              "#ffffff",
+              "#33414f",
+            ],
+            "circle-stroke-width": ["case", ["get", "locallyReceived"], 2, 1],
+            "circle-opacity": ["case", ["get", "predicted"], 0.5, 0.95],
+          },
+        });
 
       // TOI highlight ring — ordered ABOVE tracks-point, reads the SAME (already
       // filtered) track source and only renders the isToi members, so a TOI
       // hidden by a layer/provenance/display filter has no feature and cannot
       // reappear. Styling comes from the centralized presentation registry.
-      const toi = toiHighlight();
-      map.addLayer({
-        id: "tracks-highlight",
-        type: "circle",
-        source: TRACK_SOURCE,
-        filter: ["==", ["get", "isToi"], true],
-        paint: {
-          "circle-radius": toi.radius,
-          "circle-color": "rgba(0,0,0,0)",
-          "circle-stroke-color": toi.color,
-          "circle-stroke-width": toi.width,
-        },
-      });
+      if (!map.getLayer("tracks-highlight")) {
+        const toi = toiHighlight();
+        map.addLayer({
+          id: "tracks-highlight",
+          type: "circle",
+          source: TRACK_SOURCE,
+          filter: ["==", ["get", "isToi"], true],
+          paint: {
+            "circle-radius": toi.radius,
+            "circle-color": "rgba(0,0,0,0)",
+            "circle-stroke-color": toi.color,
+            "circle-stroke-width": toi.width,
+          },
+        });
+      }
+    };
 
-      // Click a track point → select it for the TOI details panel.
-      map.on("click", "tracks-point", (e) => {
-        const f = e.features?.[0];
-        const id = f?.properties?.["id"];
-        if (typeof id === "string") selectTrack(id);
-      });
-      map.on("mouseenter", "tracks-point", () => {
-        map.getCanvas().style.cursor = "pointer";
-      });
-      map.on("mouseleave", "tracks-point", () => {
-        map.getCanvas().style.cursor = "";
-      });
+    // Map/layer event handlers — bound ONCE here (not inside the style-load
+    // callback): they key off layer ids by string, tolerate being registered
+    // before the layer exists, and survive a fallback setStyle().
+    map.on("click", "tracks-point", (e) => {
+      const f = e.features?.[0];
+      const id = f?.properties?.["id"];
+      if (typeof id === "string") selectTrack(id);
+    });
+    map.on("mouseenter", "tracks-point", () => {
+      map.getCanvas().style.cursor = "pointer";
+    });
+    map.on("mouseleave", "tracks-point", () => {
+      map.getCanvas().style.cursor = "";
+    });
+    // Viewport change → debounced server re-subscribe (M3.6b). Routed through a
+    // ref so this once-registered handler always uses the freshest filters.
+    map.on("moveend", () => sendSubscribeRef.current());
 
-      // Viewport change → debounced server re-subscribe (M3.6b). Routed through a
-      // ref so this once-registered handler always uses the freshest filters.
-      map.on("moveend", () => sendSubscribeRef.current());
-
+    // Bring the overlay + live data online once a style (basemap or fallback) is
+    // ready. Idempotent, so the initial load and the fallback path share it.
+    const activate = () => {
+      if (mapRef.current !== map) return;
+      installOverlay();
       readyRef.current = true;
       pushData();
       // Initial subscribe now that bounds exist (also re-sent on socket open).
       sendSubscribeRef.current();
-    });
+    };
+
+    map.on("load", activate);
+
+    // Graceful degradation (PRD §37): a hosted basemap style that can't load
+    // (network blocked/offline) never fires `load`. After a grace period with no
+    // load, drop to the self-contained offline canvas and re-activate on its
+    // styledata. A style OBJECT loads without a network round-trip, so this always
+    // resolves. Transient single-tile errors are ignored (the style still loaded).
+    let fellBack = false;
+    const fallbackTimer = usingHostedBasemap
+      ? window.setTimeout(() => {
+          if (fellBack || mapRef.current !== map || readyRef.current) return;
+          fellBack = true;
+          // eslint-disable-next-line no-console
+          console.warn(
+            "aether: hosted basemap unavailable; falling back to offline dark canvas",
+          );
+          map.setStyle(OFFLINE_DARK_STYLE);
+          map.once("styledata", activate);
+        }, 8000)
+      : undefined;
 
     return () => {
+      if (fallbackTimer !== undefined) window.clearTimeout(fallbackTimer);
       map.remove();
       mapRef.current = null;
       readyRef.current = false;

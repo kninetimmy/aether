@@ -1,8 +1,9 @@
 // Minimal dark MapLibre style with NO external tile fetch (PRD §24.1 dark/
 // tactical; local-first per §6/§33). The shell renders our own GeoJSON record
-// layers on top of a flat dark background. A real basemap (local vector tiles /
-// protomaps) is a later milestone — kept out here so the COP stays fully
-// self-contained and private by default.
+// layers on top of a flat dark background. This is now the OFFLINE FALLBACK
+// (see basemap.ts): the default basemap is a hosted dark vector style, but if
+// it can't load — or the operator sets VITE_AETHER_BASEMAP=offline — the COP
+// drops back to this fully self-contained, private-by-default canvas.
 
 import type { StyleSpecification } from "maplibre-gl";
 
