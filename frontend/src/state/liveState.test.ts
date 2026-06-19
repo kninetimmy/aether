@@ -89,10 +89,11 @@ function event(id: string): EventRecord {
   };
 }
 
-function snapshot(seq: number, tracks: TrackRecord[] = []): SnapshotFrame {
+function snapshot(seq: number, tracks: TrackRecord[] = [], cseq = 0): SnapshotFrame {
   return {
     type: "snapshot",
     seq,
+    cseq,
     tracks,
     features: [],
     events: [],
@@ -119,55 +120,81 @@ describe("applySnapshot", () => {
   });
 });
 
-describe("applyDelta sequence continuity (PRD §22.5)", () => {
-  it("applies a delta with seq === current+1", () => {
-    const base = applySnapshot(snapshot(5));
+describe("applyDelta per-connection cseq continuity (PRD §22.5)", () => {
+  it("applies a delta with cseq === current+1", () => {
+    const base = applySnapshot(snapshot(5, [], 0));
     const { state, outcome } = applyDelta(base, {
       type: "track_upsert",
       seq: 6,
+      cseq: 1,
       record: track("a"),
     });
     expect(outcome).toBe("applied");
+    expect(state.cseq).toBe(1);
     expect(state.seq).toBe(6);
     expect(state.tracks.has("a")).toBe(true);
   });
 
-  it("ignores a duplicate/stale delta (seq <= current)", () => {
-    const base = applySnapshot(snapshot(5, [track("a")]));
+  it("applies even when the GLOBAL seq skips, as long as cseq is contiguous", () => {
+    // A filtered connection: seq jumps 5→20 (intervening frames filtered out) but
+    // cseq is still contiguous 0→1, so the delta applies (no false resync).
+    const base = applySnapshot(snapshot(5, [], 0));
     const { state, outcome } = applyDelta(base, {
       type: "track_upsert",
-      seq: 5,
+      seq: 20,
+      cseq: 1,
+      record: track("a"),
+    });
+    expect(outcome).toBe("applied");
+    expect(state.cseq).toBe(1);
+    expect(state.tracks.has("a")).toBe(true);
+  });
+
+  it("ignores a duplicate/stale delta (cseq <= current)", () => {
+    const base = applySnapshot(snapshot(5, [track("a")], 3));
+    const { state, outcome } = applyDelta(base, {
+      type: "track_upsert",
+      seq: 6,
+      cseq: 3,
       record: track("a", { label: "stale" }),
     });
     expect(outcome).toBe("duplicate");
     expect(state).toBe(base); // unchanged reference
   });
 
-  it("marks stale and does not apply on a gap (seq > current+1)", () => {
-    const base = applySnapshot(snapshot(5));
+  it("marks stale and does not apply on a cseq gap (real drop)", () => {
+    const base = applySnapshot(snapshot(5, [], 0));
     const { state, outcome } = applyDelta(base, {
       type: "track_upsert",
       seq: 8,
+      cseq: 3, // expected 1 — a true per-connection drop
       record: track("a"),
     });
     expect(outcome).toBe("gap");
     expect(state.stale).toBe(true);
-    expect(state.seq).toBe(5); // not advanced
+    expect(state.cseq).toBe(0); // not advanced
     expect(state.tracks.has("a")).toBe(false); // not applied
   });
 
-  it("a fresh snapshot recovers from stale", () => {
-    const base = { ...applySnapshot(snapshot(5)), stale: true };
-    const recovered = applyFrame(base, snapshot(9, [track("z")])).state;
+  it("a fresh snapshot recovers from stale and re-anchors cseq", () => {
+    const base = { ...applySnapshot(snapshot(5, [], 7)), stale: true };
+    const recovered = applyFrame(base, snapshot(9, [track("z")], 0)).state;
     expect(recovered.stale).toBe(false);
     expect(recovered.seq).toBe(9);
+    expect(recovered.cseq).toBe(0); // resync point
   });
 });
 
 describe("delta kinds", () => {
   it("removes a track", () => {
-    const base = applySnapshot(snapshot(1, [track("a")]));
-    const { state } = applyDelta(base, { type: "remove", seq: 2, kind: "track", id: "a" });
+    const base = applySnapshot(snapshot(1, [track("a")], 0));
+    const { state } = applyDelta(base, {
+      type: "remove",
+      seq: 2,
+      cseq: 1,
+      kind: "track",
+      id: "a",
+    });
     expect(state.tracks.has("a")).toBe(false);
   });
 
@@ -176,6 +203,7 @@ describe("delta kinds", () => {
     const { state } = applyDelta(base, {
       type: "source_status",
       seq: 2,
+      cseq: 1,
       record: status("local_adsb"),
     });
     expect(state.sourceStatus.get("local_adsb")?.status).toBe("connected");
@@ -184,7 +212,12 @@ describe("delta kinds", () => {
   it("appends events with a bounded ring", () => {
     let state = applySnapshot(snapshot(0));
     for (let i = 1; i <= RECENT_EVENTS_MAX + 10; i++) {
-      state = applyDelta(state, { type: "event", seq: i, record: event(`e${i}`) }).state;
+      state = applyDelta(state, {
+        type: "event",
+        seq: i,
+        cseq: i,
+        record: event(`e${i}`),
+      }).state;
     }
     expect(state.events.length).toBe(RECENT_EVENTS_MAX);
   });
@@ -213,7 +246,12 @@ describe("delta kinds", () => {
       resolved_at: null,
       delivery_status: {},
     };
-    const { state } = applyDelta(base, { type: "alert_upsert", seq: 2, record: alert });
+    const { state } = applyDelta(base, {
+      type: "alert_upsert",
+      seq: 2,
+      cseq: 1,
+      record: alert,
+    });
     expect(state.alerts.get("al1")?.severity).toBe("high");
   });
 
@@ -237,13 +275,19 @@ describe("delta kinds", () => {
       severity: null,
       label: "TFR 1",
     };
-    const { state } = applyDelta(base, { type: "feature_upsert", seq: 2, record: feat });
+    const { state } = applyDelta(base, {
+      type: "feature_upsert",
+      seq: 2,
+      cseq: 1,
+      record: feat,
+    });
     expect(state.features.get("f1")?.feature_type).toBe("tfr");
   });
 });
 
 describe("emptyState", () => {
-  it("starts at seq -1 so the first snapshot at seq 0 applies", () => {
+  it("starts at seq/cseq -1 so the first snapshot (cseq 0) applies", () => {
     expect(emptyState().seq).toBe(-1);
+    expect(emptyState().cseq).toBe(-1);
   });
 });

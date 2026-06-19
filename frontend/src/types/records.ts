@@ -252,10 +252,16 @@ export type AnyRecord =
   | SourceStatusRecord;
 
 // --- Wire frames (PRD §22) -------------------------------------------------
+// Every server→client frame carries BOTH the global `seq` (REST/snapshot anchor;
+// bumps on every mutation) and a PER-CONNECTION contiguous `cseq` (M3.6b). A
+// filtered client's `seq` legitimately skips, so gap detection keys off `cseq`,
+// not `seq`. `cseq` is additive — no schema_version bump. A snapshot always
+// resets `cseq` to 0 (every subscribe is a resync point, PRD §22.5).
 
 export interface SnapshotFrame {
   type: "snapshot";
   seq: number;
+  cseq: number;
   tracks: TrackRecord[];
   features: GeoFeatureRecord[];
   events: EventRecord[];
@@ -266,31 +272,37 @@ export interface SnapshotFrame {
 export interface TrackUpsertFrame {
   type: "track_upsert";
   seq: number;
+  cseq: number;
   record: TrackRecord;
 }
 export interface FeatureUpsertFrame {
   type: "feature_upsert";
   seq: number;
+  cseq: number;
   record: GeoFeatureRecord;
 }
 export interface AlertUpsertFrame {
   type: "alert_upsert";
   seq: number;
+  cseq: number;
   record: AlertRecord;
 }
 export interface SourceStatusFrame {
   type: "source_status";
   seq: number;
+  cseq: number;
   record: SourceStatusRecord;
 }
 export interface EventFrame {
   type: "event";
   seq: number;
+  cseq: number;
   record: EventRecord;
 }
 export interface RemoveFrame {
   type: "remove";
   seq: number;
+  cseq: number;
   kind: RecordKind;
   id: string;
 }
@@ -304,3 +316,17 @@ export type DeltaFrame =
   | RemoveFrame;
 
 export type ServerFrame = SnapshotFrame | DeltaFrame;
+
+// --- Client→server subscribe frame (PRD §22.2) -----------------------------
+// Debounced (~300ms) on viewport/filter change and re-sent on (re)connect. bbox
+// is GeoJSON order [minLon, minLat, maxLon, maxLat] (lon FIRST — guard the classic
+// lon/lat swap). null bbox = unbounded; null sources/track_types = all.
+
+export interface SubscribeFrame {
+  type: "subscribe";
+  bbox: [number, number, number, number] | null;
+  sources: string[] | null;
+  track_types: TrackType[] | null;
+  include_events: boolean;
+  include_alerts: boolean;
+}

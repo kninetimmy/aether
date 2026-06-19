@@ -5,7 +5,7 @@
 // owns the transport.
 
 import { applyFrame, emptyState, type LiveState } from "../state/liveState";
-import type { ServerFrame } from "../types/records";
+import type { ServerFrame, SubscribeFrame } from "../types/records";
 
 export type ConnectionStatus = "connecting" | "open" | "closed";
 
@@ -19,10 +19,14 @@ export interface WsClientOptions {
   /** Initial reconnect backoff (ms); doubles up to maxBackoffMs. */
   baseBackoffMs?: number;
   maxBackoffMs?: number;
+  /** Debounce for outbound subscribe frames (ms). Mirrors the server guard. */
+  subscribeDebounceMs?: number;
 }
 
 const DEFAULT_BASE_BACKOFF = 500;
 const DEFAULT_MAX_BACKOFF = 10_000;
+/** ~300ms viewport/filter debounce (PRD §22.2) — above the server min-interval. */
+const DEFAULT_SUBSCRIBE_DEBOUNCE = 300;
 
 /** Resolve the ws:// URL for /ws/v2 from the current page (or an override). */
 export function defaultWsUrl(): string {
@@ -35,11 +39,15 @@ export class WsClient {
   private readonly url: string;
   private readonly baseBackoff: number;
   private readonly maxBackoff: number;
+  private readonly subscribeDebounce: number;
   private socket: WebSocket | null = null;
   private state: LiveState = emptyState();
   private backoff: number;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private subscribeTimer: ReturnType<typeof setTimeout> | null = null;
   private closedByUser = false;
+  /** Latest subscribe intent; re-sent on (re)connect so the server re-anchors. */
+  private lastSubscribe: SubscribeFrame | null = null;
 
   constructor(
     private readonly cb: WsClientCallbacks,
@@ -48,6 +56,7 @@ export class WsClient {
     this.url = opts.url ?? defaultWsUrl();
     this.baseBackoff = opts.baseBackoffMs ?? DEFAULT_BASE_BACKOFF;
     this.maxBackoff = opts.maxBackoffMs ?? DEFAULT_MAX_BACKOFF;
+    this.subscribeDebounce = opts.subscribeDebounceMs ?? DEFAULT_SUBSCRIBE_DEBOUNCE;
     this.backoff = this.baseBackoff;
   }
 
@@ -62,8 +71,33 @@ export class WsClient {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    if (this.subscribeTimer) {
+      clearTimeout(this.subscribeTimer);
+      this.subscribeTimer = null;
+    }
     this.socket?.close();
     this.socket = null;
+  }
+
+  /**
+   * Record the latest subscribe intent (viewport/filter) and send it debounced.
+   * Stored so a (re)connect re-sends it — every subscribe is a server resync
+   * point that re-anchors a fresh filtered snapshot + cseq=0 (PRD §22.2/§22.5).
+   */
+  subscribe(frame: SubscribeFrame): void {
+    this.lastSubscribe = frame;
+    if (this.subscribeTimer) clearTimeout(this.subscribeTimer);
+    this.subscribeTimer = setTimeout(() => {
+      this.subscribeTimer = null;
+      this.sendSubscribe();
+    }, this.subscribeDebounce);
+  }
+
+  private sendSubscribe(): void {
+    if (!this.lastSubscribe) return;
+    if (this.socket?.readyState === WebSocket.OPEN) {
+      this.socket.send(JSON.stringify(this.lastSubscribe));
+    }
   }
 
   private open(): void {
@@ -74,6 +108,11 @@ export class WsClient {
     socket.onopen = () => {
       this.backoff = this.baseBackoff;
       this.cb.onStatus("open");
+      // Re-send the last subscribe intent immediately on (re)connect (no debounce):
+      // the server replies with a fresh filtered snapshot and resets cseq, which
+      // applyFrame treats as the resync baseline. Until the first subscribe the
+      // server already serves its default station-scoped snapshot.
+      this.sendSubscribe();
     };
 
     socket.onmessage = (ev: MessageEvent) => this.handleMessage(ev.data);

@@ -1877,12 +1877,40 @@ GET /ws/v2
 }
 ```
 
+`bbox` is GeoJSON order `[minLon, minLat, maxLon, maxLat]` (longitude first). `null`
+`bbox` means unbounded; `null` `sources`/`track_types` means all. The client
+debounces this frame (~300 ms) on viewport/filter change and re-sends it on every
+(re)connect.
+
+Server-side handling (per connection, M3.6b — display-stream filtering only, PRD
+§16.3 interpretation (a)):
+
+- Before any subscribe, the connection gets a **default station-scoped filter** from
+  the canonical `AETHER_STATION_LAT`/`_LON`/`_RADIUS_NM`. An unconfigured 0,0 station
+  degrades to **unbounded** (never a zero-area null-island box).
+- A subscribe `bbox` is validated (4 finite WGS84 floats; `minLat <= maxLat`;
+  `minLon > maxLon` allowed for an antimeridian viewport) and **intersected with the
+  station max AOI** — a client may narrow but not widen beyond the station scope. A
+  malformed subscribe is logged and the **prior filter kept**; it never drops the
+  connection. The subscribe receive loop is rate-limited so subscribe-spam cannot
+  starve the send loop.
+- `matches`: `source_status` **always** passes (health reaches every client); alerts
+  are gated by `include_alerts`; events by `include_events` AND (no geometry OR bbox
+  hit); tracks by `source` ∈ `sources` AND `track_type` ∈ `track_types` AND (geometry
+  `null` OR point-in-bbox — `null` passes so a just-acquired track isn't hidden);
+  features by `source` AND geometry-intersects-bbox.
+- A **track that moves out of the viewport** relies on the client's own staleness GC
+  for now (no synthetic remove is emitted); a real `remove` for an id the connection
+  was already sent is **force-forwarded** regardless of the filter so a filtered
+  client never strands a ghost track.
+
 ### 22.3 Snapshot
 
 ```json
 {
   "type": "snapshot",
   "seq": 1841,
+  "cseq": 0,
   "tracks": [],
   "features": [],
   "events": [],
@@ -1891,25 +1919,43 @@ GET /ws/v2
 }
 ```
 
+A snapshot is filtered by the connection's current filter. Every subscribe (initial,
+widened bbox, reconnect) is a **resync point**: the server re-anchors a fresh filtered
+snapshot at the current global `seq` and resets `cseq` to 0. Because each subscribe
+re-snapshots, a widened bbox backfills previously-filtered records for free.
+
 ### 22.4 Deltas
 
 ```json
-{"type":"track_upsert","seq":1842,"record":{}}
-{"type":"feature_upsert","seq":1843,"record":{}}
-{"type":"event","seq":1844,"record":{}}
-{"type":"alert_upsert","seq":1845,"record":{}}
-{"type":"source_status","seq":1846,"record":{}}
-{"type":"remove","seq":1847,"kind":"track","id":"aircraft:icao:abcdef"}
+{"type":"track_upsert","seq":1842,"cseq":1,"record":{}}
+{"type":"feature_upsert","seq":1843,"cseq":2,"record":{}}
+{"type":"event","seq":1844,"cseq":3,"record":{}}
+{"type":"alert_upsert","seq":1845,"cseq":4,"record":{}}
+{"type":"source_status","seq":1846,"cseq":5,"record":{}}
+{"type":"remove","seq":1847,"cseq":6,"kind":"track","id":"aircraft:icao:abcdef"}
 ```
+
+Every server→client frame carries **two** counters (M3.6b, additive — no
+`schema_version` bump):
+
+- `seq` — the **global** mutation counter (the REST/snapshot anchor). It bumps on
+  every backend mutation, so a per-connection-filtered client legitimately sees it
+  **skip**.
+- `cseq` — a **per-connection contiguous** counter. A snapshot resets it to 0; each
+  delta the server actually sends this connection increments it by exactly 1. Frames
+  the connection's filter rejects receive **no** `cseq` (no false gap); a real
+  drop-oldest under backpressure leaves a `cseq` gap exactly when frames were truly
+  dropped.
 
 ### 22.5 Resynchronization
 
-If a client sees a sequence gap:
+Clients gap-detect on **`cseq`** (not `seq` — a skipped `seq` is "filtered/expected",
+a skipped `cseq` is "dropped/real"). If a client sees a `cseq` gap:
 
 1. Stop applying deltas.
 2. Mark display stale.
-3. Request a new snapshot or reconnect.
-4. Replace local authoritative state.
+3. Request a new snapshot or reconnect (re-send the last subscribe).
+4. Replace local authoritative state (the fresh snapshot re-anchors `cseq` to 0).
 5. Resume.
 
 ### 22.6 Backpressure

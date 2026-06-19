@@ -4,7 +4,7 @@
 // rotation and sprite symbols arrive with a real basemap in a later milestone.
 
 import maplibregl, { type Map as MlMap } from "maplibre-gl";
-import { useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import {
   featureFeatureCollection,
   trackFeatureCollection,
@@ -38,6 +38,44 @@ export function MapView() {
   const clock = useStore((s) => s.clock);
   const watchlist = useStore((s) => s.watchlist);
   const selectTrack = useStore((s) => s.selectTrack);
+  const client = useStore((s) => s.client);
+
+  // The server-side display-stream subscription (M3.6b): the viewport bbox plus
+  // the source/track-type display filters become a debounced `subscribe` frame so
+  // the backend trims the snapshot+delta firehose per-connection (PRD §16.3,
+  // §22.2). The bbox is the map's current bounds; sources/track_types come from
+  // the SAME DisplayFilters the client-side chokepoint reads, so server and client
+  // filtering agree. include_events/alerts stay on (no UI toggle yet).
+  const sendSubscribe = useCallback(() => {
+    const map = mapRef.current;
+    if (!map || !client) return;
+    const b = map.getBounds();
+    const bbox: [number, number, number, number] = [
+      b.getWest(),
+      b.getSouth(),
+      b.getEast(),
+      b.getNorth(),
+    ];
+    client.subscribe({
+      type: "subscribe",
+      bbox,
+      sources: filters.sources ? [...filters.sources] : null,
+      track_types: filters.trackTypes ? [...filters.trackTypes] : null,
+      include_events: true,
+      include_alerts: true,
+    });
+  }, [client, filters.sources, filters.trackTypes]);
+
+  // The map's moveend (registered once) must always call the FRESHEST subscribe
+  // closure, so route it through a ref rather than re-binding listeners.
+  const sendSubscribeRef = useRef(sendSubscribe);
+  sendSubscribeRef.current = sendSubscribe;
+
+  // Re-subscribe whenever the source/track-type filters or the client change (the
+  // viewport path fires from moveend below). Debounced inside WsClient.
+  useEffect(() => {
+    sendSubscribe();
+  }, [sendSubscribe]);
 
   // The display filters (provenance, live-LOCAL, range, age, AIS, …) are applied
   // through the single visibleTracks chokepoint, so a filtered-out track leaves
@@ -156,8 +194,14 @@ export function MapView() {
         map.getCanvas().style.cursor = "";
       });
 
+      // Viewport change → debounced server re-subscribe (M3.6b). Routed through a
+      // ref so this once-registered handler always uses the freshest filters.
+      map.on("moveend", () => sendSubscribeRef.current());
+
       readyRef.current = true;
       pushData();
+      // Initial subscribe now that bounds exist (also re-sent on socket open).
+      sendSubscribeRef.current();
     });
 
     return () => {
