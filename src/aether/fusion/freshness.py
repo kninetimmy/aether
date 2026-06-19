@@ -63,6 +63,12 @@ DEFAULT_FRESHNESS: dict[str, FreshnessWindow] = {
     "demo-net": FreshnessWindow(15.0, 60.0, 120.0),
     "local_aprs": FreshnessWindow(300.0, 1800.0, 7200.0),
     "aprs_is": FreshnessWindow(300.0, 1800.0, 7200.0),
+    # AIS vessel dynamics (PRD §15.4 "AIS dynamic": live 0-60s / stale 1-10min /
+    # expire 30min). Slower than ADS-B — a moving Class A reports every 2-10s but a
+    # slow or Class B vessel only every few minutes — so the network-grade fallback
+    # (120s expire) would drop a vessel between reports. Static/voyage data is folded
+    # into the position record at the adapter edge, so one source-name window suffices.
+    "ais": FreshnessWindow(60.0, 600.0, 1800.0),
 }
 
 #: Conservative window for any source not in the table — treated network-grade so

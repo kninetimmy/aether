@@ -129,6 +129,31 @@ center via `AETHER_NETWORK_ADSB_LAT` / `AETHER_NETWORK_ADSB_LON` (the repo carri
 no station coordinates); a >250 NM `AETHER_NETWORK_ADSB_RADIUS_NM` is tiled into
 provider-compliant requests automatically.
 
+### AIS vessels (no live API)
+
+The AIS adapter streams vessel tracks from [AISStream.io](https://aisstream.io) over
+a secure WebSocket, subscribed to a bounding box around the AOI, merging each
+vessel's separate position and static/voyage messages into one track by MMSI. A fake
+WebSocket feeder stands in for the no-hardware path (plain `ws`, no key):
+
+```bash
+# Fake AISStream WebSocket server + adapter (static + dynamic merge by MMSI)
+python -m aether.adapters.ais_fake_feeder 127.0.0.1 8765 &                     # canned vessel frames only
+AETHER_DEMO_SOURCE=0 AETHER_AIS=1 AETHER_AIS_TLS=0 \
+    AETHER_AIS_HOST=127.0.0.1 AETHER_AIS_PORT=8765 AETHER_AIS_API_KEY=demo \
+    AETHER_AIS_LAT=38.5 AETHER_AIS_LON=-74.5 \
+    uvicorn aether.backend.main:app --app-dir src
+```
+
+A real deployment leaves `AETHER_AIS_TLS=1` (the `wss://stream.aisstream.io`
+endpoint), supplies a free [AISStream](https://aisstream.io) API key via
+`AETHER_AIS_API_KEY`, and the AOI center via `AETHER_AIS_LAT` / `AETHER_AIS_LON` (the
+repo carries no key or coordinates; an enabled-but-unconfigured adapter reports
+`offline`, never connects anonymously). **Limitations:** AIS positions are *reported
+broadcasts*, not verified navigation truth (AIS-FR-006); AISStream enforces per-key
+rate limits, so the adapter holds a single subscription within the configured area;
+this is a network-only feed (no local-RF leg), so every vessel is network provenance.
+
 ---
 
 ## Verify

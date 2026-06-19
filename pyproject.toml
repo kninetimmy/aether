@@ -18,6 +18,12 @@ dependencies = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
     "aiomqtt>=2.0",
+    # AISStream is a secure-WebSocket feed (PRD §18.5); the AIS adapter speaks it
+    # with this client (also serves the no-hardware fake feeder). Present already
+    # via uvicorn[standard], but declared explicitly since aether imports it. Floor
+    # is 14: that release made the asyncio impl (single-arg handler, top-level
+    # connect/serve, Server.serve_forever) the default that ais_fake_feeder uses.
+    "websockets>=14",
 ]
 
 [project.optional-dependencies]
