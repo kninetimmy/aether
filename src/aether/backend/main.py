@@ -14,12 +14,13 @@ Run the no-hardware demo (broker first):
 import asyncio
 import contextlib
 import logging
+import sqlite3
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
 
 import aiomqtt
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 
 from aether.adapters.ais import run_ais
 from aether.adapters.aprs_is import run_aprs_is
@@ -32,7 +33,9 @@ from aether.backend.subscription import default_filter, parse_subscribe
 from aether.bus.client import DEFAULT_RECONNECT_S, connect, run_record_subscriber
 from aether.bus.demo_publisher import run_demo_publisher
 from aether.config import Settings
+from aether.persist.database import ObservationRow, read_track_history
 from aether.persist.runner import run_persistence
+from aether.schema.validation import dump_record
 
 log = logging.getLogger(__name__)
 
@@ -129,6 +132,69 @@ def create_app(*, settings: Settings | None = None, demo_interval_s: float = 1.0
             )
         }
 
+    @app.get("/api/v2/tracks/{track_id}")
+    async def track_detail(track_id: str) -> dict[str, Any]:
+        """Current fused track by id (PRD §21.3), served from live state.
+
+        404 when no such track is live — the same id the snapshot/websocket exposes
+        is the lookup key (a fused track's id is its correlation key).
+        """
+        track = hub.state.get_track(track_id)
+        if track is None:
+            raise HTTPException(status_code=404, detail=f"no live track {track_id!r}")
+        return dump_record(track)
+
+    @app.get("/api/v2/tracks/{track_id}/history")
+    async def track_history(
+        track_id: str,
+        start: str | None = Query(default=None),
+        end: str | None = Query(default=None),
+        limit: int | None = Query(default=None, ge=1),
+    ) -> dict[str, Any]:
+        """Persisted observations for one track, oldest-first (PRD §21.3/§11.15).
+
+        Reads the persistence store on a fresh read-only connection in a worker
+        thread, so a slow or locked store can never gate serving live state (PRD §5).
+        Honest degradation (PRD §37): 503 when persistence is disabled (history is
+        categorically unavailable, not "empty"); a not-yet-created store or a
+        transient read error returns an empty list rather than a 500. ``truncated``
+        flags that the per-request cap was hit, so a capped trail is never mistaken
+        for the complete one.
+        """
+        if not cfg.persist:
+            raise HTTPException(status_code=503, detail="persistence disabled; no track history")
+        want = cfg.history_max_points if limit is None else min(limit, cfg.history_max_points)
+        try:
+            start_iso = _normalize_iso(start)
+            end_iso = _normalize_iso(end)
+        except ValueError:
+            raise HTTPException(
+                status_code=400, detail="start/end must be ISO-8601 timestamps"
+            ) from None
+        try:
+            rows = await asyncio.to_thread(
+                read_track_history,
+                cfg.db_path,
+                track_id,
+                start_iso=start_iso,
+                end_iso=end_iso,
+                limit=want,
+            )
+        except sqlite3.OperationalError:
+            rows = []  # store not created yet (nothing persisted) → empty history
+        except sqlite3.Error:
+            log.warning(
+                "track history read failed for %s; returning empty", track_id, exc_info=True
+            )
+            rows = []
+        return {
+            "track_id": track_id,
+            "count": len(rows),
+            "limit": want,
+            "truncated": len(rows) >= want,
+            "points": [_history_point(r) for r in rows],
+        }
+
     @app.websocket("/ws/v2")
     async def ws_v2(websocket: WebSocket) -> None:
         await websocket.accept()
@@ -158,6 +224,42 @@ def create_app(*, settings: Settings | None = None, demo_interval_s: float = 1.0
             hub.unregister(conn)
 
     return app
+
+
+def _normalize_iso(value: str | None) -> str | None:
+    """Normalize an ISO-8601 query bound to the store's canonical UTC-ISO form.
+
+    The store compares ``observed_at`` lexically (UTC ISO with a fixed ``+00:00``
+    offset), so a query bound must be converted to that exact shape to compare
+    chronologically — any offset is converted to UTC and a naive instant is read as
+    UTC. Returns ``None`` for ``None``; raises ``ValueError`` on an unparseable value
+    (the endpoint maps that to HTTP 400).
+    """
+    if value is None:
+        return None
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC).isoformat()
+
+
+def _history_point(row: ObservationRow) -> dict[str, Any]:
+    """Project a persisted observation to a lightweight history-trail point.
+
+    Only the indexed/flattened fields a trail or timeline needs — the full record
+    JSON in ``payload`` is intentionally omitted so a long history stays small; the
+    contributing ``source`` distinguishes local vs network points. Lossless
+    reconstruction is replay's job (later M4 slice).
+    """
+    return {
+        "observed_at": row.observed_at,
+        "received_at": row.received_at,
+        "source": row.source,
+        "track_type": row.track_type,
+        "lon": row.lon,
+        "lat": row.lat,
+        "alt_m": row.alt_m,
+    }
 
 
 async def _ws_send(websocket: WebSocket, conn: Connection) -> None:

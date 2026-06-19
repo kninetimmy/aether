@@ -302,3 +302,14 @@ def test_poison_group_does_not_abort_expiry_sweep() -> None:
     changes = state.expire(now=T0 + timedelta(minutes=1))  # must not raise
     assert ("remove", "loose") in {(c.op, c.id) for c in changes}
     assert state.snapshot().tracks == []
+
+
+def test_get_track_returns_fused_track_by_id() -> None:
+    # Backs GET /api/v2/tracks/{id}: the fused track's id is its correlation key,
+    # so the same id the snapshot exposes is the detail-lookup key (PRD §21.3).
+    state = LiveState()
+    state.apply(_local_track(), now=T0)
+    assert state.get_track(CORR) is not None
+    assert state.get_track(CORR).id == CORR  # type: ignore[union-attr]
+    assert state.get_track("local_adsb:abc") is None  # per-source id is not the key
+    assert state.get_track("nope") is None
