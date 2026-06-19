@@ -18,14 +18,17 @@ SQLite on the hot path — so evaluation never does blocking I/O and never gates
 serving live state. With persistence off there are simply no rules and the engine
 is an inert no-op.
 
-**Scope of this slice.** Only rules whose every leaf is a
-:data:`~aether.alerts.conditions.STATELESS_OPERATORS` member are evaluated; a rule
-carrying a contextual operator (geofence containment, distance/elevation, time
-windows, ``changed_to/from``) is skipped here and lands with the contextual engine
-(M4.6c). Notification *delivery* (email/Discord/browser drivers) is a later slice
-(M4.7): an emitted alert records its selected channels as ``pending`` in
-``delivery_status`` and appears in the dashboard alert centre, which *is* the
-dashboard channel.
+**Scope.** Stateless rules are evaluated by the level core
+(:func:`~aether.alerts.conditions.evaluate_conditions`); contextual rules (geofence
+containment, distance/elevation, time windows, ``changed_to/from``) are collapsed to
+the SAME boolean ``(level, discrete)`` by the :class:`~aether.alerts.contextual.
+ContextualEvaluator` (M4.6c) and fed through the *identical* edge/cooldown/dedup/
+auto-resolve path — one firing model, no duplication. The evaluator holds the prior
+per-subject state and an in-memory mirror of the geofence set (synced here exactly
+like the ruleset), so evaluation stays off the hot-path disk and never blocks.
+Notification *delivery* (email/Discord/browser drivers) is a later slice (M4.7): an
+emitted alert records its selected channels as ``pending`` in ``delivery_status`` and
+appears in the dashboard alert centre, which *is* the dashboard channel.
 
 **Transition semantics** over the boolean level a rule's conditions define for a
 subject:
@@ -55,7 +58,9 @@ from datetime import datetime
 from typing import Any
 
 from aether.alerts.conditions import evaluate_conditions, is_stateless
+from aether.alerts.contextual import ContextualEvaluator, StationRef
 from aether.schema.alert_rule import AlertRule, TimeWindow
+from aether.schema.geofence import Geofence
 from aether.schema.records import (
     AlertRecord,
     EventRecord,
@@ -217,26 +222,60 @@ class AlertEngine:
         *,
         clock: Callable[[], datetime],
         id_factory: Callable[[], str] | None = None,
+        station_lat: float = 0.0,
+        station_lon: float = 0.0,
     ) -> None:
         self._rules: dict[str, AlertRule] = {}
         self._firings: dict[tuple[str, str], _Firing] = {}
         self._clock = clock
         self._id_factory = id_factory or (lambda: f"alert-{uuid.uuid4().hex[:12]}")
+        # The contextual evaluator computes the firing *level* for any rule the
+        # stateless core can't (geometry/state/time). It is given the canonical
+        # station (0,0 ⇒ unconfigured, so station-relative leaves degrade visibly,
+        # never measure from null island — PRD §5).
+        configured = not (station_lat == 0.0 and station_lon == 0.0)
+        self._contextual = ContextualEvaluator(
+            station=StationRef(lon=station_lon, lat=station_lat, configured=configured)
+        )
 
     # -- ruleset sync (kept current by the CRUD path, never re-read on the hot path) --
 
     def set_rules(self, rules: Iterable[AlertRule]) -> None:
         """Replace the whole ruleset (startup load from the store)."""
         self._rules = {rule.id: rule for rule in rules}
+        self._contextual.set_rules(frozenset(self._rules))
 
     def upsert_rule(self, rule: AlertRule) -> None:
-        """Add or replace one rule (after a successful create/patch)."""
+        """Add or replace one rule (after a successful create/patch).
+
+        Re-baselines the rule's contextual per-subject state, so an edit treats the
+        next observation of each subject as a fresh first sighting — symmetric with
+        :meth:`remove_rule`/:meth:`set_rules`, and the only way a changed/condition
+        edit can't be confused by a stale prior level (the firing memory, keyed by id,
+        is re-derived from the next edge regardless).
+        """
         self._rules[rule.id] = rule
+        self._contextual.forget_rule(rule.id)
 
     def remove_rule(self, rule_id: str) -> None:
         """Drop a rule and forget every firing it owned (after a successful delete)."""
         self._rules.pop(rule_id, None)
         self._firings = {key: f for key, f in self._firings.items() if key[0] != rule_id}
+        self._contextual.forget_rule(rule_id)
+
+    # -- geofence sync (mirrors the ruleset sync; feeds contextual containment math) --
+
+    def set_geofences(self, geofences: Iterable[Geofence]) -> None:
+        """Replace the whole geofence set the contextual evaluator references."""
+        self._contextual.set_geofences(geofences)
+
+    def upsert_geofence(self, geofence: Geofence) -> None:
+        """Add or replace one geofence (after a successful create/patch)."""
+        self._contextual.upsert_geofence(geofence)
+
+    def remove_geofence(self, geofence_id: str) -> None:
+        """Drop one geofence (after a successful delete)."""
+        self._contextual.remove_geofence(geofence_id)
 
     @property
     def rule_count(self) -> int:
@@ -267,10 +306,27 @@ class AlertEngine:
         for rule in self._rules.values():
             if not rule.enabled or subject_type not in rule.subject_types:
                 continue
-            if not is_stateless(rule.conditions):
-                continue  # contextual operators: evaluated by the M4.6c engine, not here
+            if is_stateless(rule.conditions):
+                out.extend(
+                    self._apply_rule(
+                        rule, record, subject, dump, now, discrete=change.op == "event"
+                    )
+                )
+                continue
+            # Contextual rule: the evaluator collapses it to the same (level, discrete)
+            # the stateless path produces, then the identical _drive machinery fires it.
+            res = self._contextual.evaluate(rule, subject, record, dump, now)
+            if not res.evaluable:
+                continue  # honest 'unknown': no fire, no false resolve (PRD §37)
             out.extend(
-                self._apply_rule(rule, record, subject, dump, now, discrete=change.op == "event")
+                self._drive(
+                    rule,
+                    subject,
+                    record,
+                    now,
+                    level=res.level,
+                    discrete=res.discrete or change.op == "event",
+                )
             )
         return out
 
@@ -284,17 +340,43 @@ class AlertEngine:
         *,
         discrete: bool,
     ) -> list[AlertRecord]:
-        """Apply one matching rule to one record; return any emitted alerts.
+        """Compute a stateless rule's level and drive it through the firing machinery.
+
+        A thin wrapper over :meth:`_drive`: the only stateless-specific work is
+        evaluating the level core. Contextual rules reach :meth:`_drive` directly with
+        an evaluator-computed level, so both share one firing model.
+        """
+        return self._drive(
+            rule,
+            subject,
+            record,
+            now,
+            level=evaluate_conditions(rule.conditions, dump),
+            discrete=discrete,
+        )
+
+    def _drive(
+        self,
+        rule: AlertRule,
+        subject: str,
+        record: Record,
+        now: datetime,
+        *,
+        level: bool,
+        discrete: bool,
+    ) -> list[AlertRecord]:
+        """Turn a precomputed ``(level, discrete)`` for one (rule, subject) into alerts.
 
         ``discrete`` (an event record, or a ``change``-transition rule) means a
         point-in-time trigger: cooldown-gated, no open-alert dedup, no auto-resolve.
         Otherwise the rule has a continuous level and we detect enter/exit edges,
-        dedup against a still-open alert, and auto-resolve on the closing edge.
+        dedup against a still-open alert, and auto-resolve on the closing edge. This is
+        the single firing path the stateless and contextual evaluation both feed.
         """
         key = (rule.id, rule.dedup_key if rule.dedup_key is not None else subject)
         firing = self._firings.setdefault(key, _Firing())
         prev = firing.level
-        current = evaluate_conditions(rule.conditions, dump)
+        current = level
         transition = rule.transition or "enter"
 
         if discrete or transition == "change":
@@ -349,6 +431,9 @@ class AlertEngine:
                 self._firings.pop(key, None)
             else:
                 firing.level = False
+        # Forget the gone subject's contextual state once — it is keyed by the raw
+        # subject, so this clears every rule's entry for it (bounded maps, PRD §37).
+        self._contextual.forget_subject(removed_id)
         return out
 
     def _can_fire_level(self, firing: _Firing, rule: AlertRule, now: datetime) -> bool:

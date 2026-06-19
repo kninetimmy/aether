@@ -65,3 +65,51 @@ def test_engine_fires_military_alert_and_ack_closes_it(
         # The acknowledgement is reflected in live state.
         live = next(a for a in _alerts_for_rule(client, _MILITARY_RULE) if a["id"] == alert["id"])
         assert live["state"] == "acknowledged"
+
+
+def test_geofence_enter_rule_fires_over_demo_stream(
+    broker_settings: Settings, tmp_path: Path
+) -> None:
+    """A created geofence + entered_geofence rule fires on a demo track (M4.6c).
+
+    Proves the geofence→engine sync path end to end: ``POST /api/v2/geofences``
+    syncs the engine's contextual mirror, ``POST /api/v2/alert-rules`` registers an
+    ``entered_geofence`` rule referencing it, and the demo's ``demo03`` orbit
+    (centered (-95.4, 40.5)) is contained by a generous circle there — so containment
+    math fires an open alert into live state with no hardware.
+    """
+    db_path = str(tmp_path / "geofence-enter.db")
+    with _app(broker_settings, db_path) as client:
+        gf = client.post(
+            "/api/v2/geofences",
+            json={
+                "name": "demo03 ring",
+                "shape": {
+                    "kind": "circle",
+                    "center": [-95.4, 40.5],
+                    "radius_m": 50000.0,  # ~50 km covers the demo03 orbit
+                },
+            },
+        )
+        assert gf.status_code == 201
+        geofence_id = gf.json()["id"]
+
+        rule = client.post(
+            "/api/v2/alert-rules",
+            json={
+                "name": "Aircraft entered demo03 ring",
+                "severity": "medium",
+                "subject_types": ["aircraft"],
+                "conditions": [{"field": "geometry", "operator": "entered_geofence"}],
+                "geofence_id": geofence_id,
+                "transition": "enter",
+                "enabled": True,
+                "channels": ["dashboard"],
+            },
+        )
+        assert rule.status_code == 201
+        rule_id = rule.json()["id"]
+
+        alert = _wait_for_alert(client, rule_id)
+        assert alert["state"] == "open"
+        assert alert["subject_id"]  # attributed to a demo aircraft inside the fence

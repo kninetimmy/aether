@@ -1,0 +1,183 @@
+"""Geometry predicates for contextual alert operators (PRD §12 #6/#7, §20.2).
+
+The first behavioural consumers of geofence/station geometry. Pure, total
+functions over plain floats and the geometry *types* (no record dumps, no I/O), so
+the evaluator can call them on the hot path and mypy-strict sees no ``Any`` leak.
+Spherical-Earth math on the WGS84 mean radius (``_EARTH_RADIUS_M`` from
+:mod:`aether.schema.geometry`) — adequate at home-station scale (<=500 NM AOI), the
+same approximation the circle-display projection already accepts. None of these
+raises; an out-of-domain input returns the documented safe default so the evaluator
+never guards a ``ValueError`` mid-AND. Circle containment uses the AUTHORITATIVE
+center+radius, never the 64-gon display polygon.
+"""
+
+from __future__ import annotations
+
+import math
+
+from aether.schema.geofence import CircleShape, Geofence
+from aether.schema.geometry import _EARTH_RADIUS_M, Polygon, Position
+
+
+def haversine_m(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
+    """Great-circle distance between two ``[lon, lat]`` points, in metres.
+
+    Standard haversine on the WGS84 mean sphere — the same formula the geofence
+    model's circle projection inverts, so a ``point_in_circle`` test is consistent
+    with the displayed ring at geofence scale.
+    """
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlmb = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2.0) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlmb / 2.0) ** 2
+    return 2.0 * _EARTH_RADIUS_M * math.asin(math.sqrt(a))
+
+
+def point_in_ring(lon: float, lat: float, ring: list[Position]) -> bool:
+    """Even-odd ray cast for ONE ring, antimeridian-aware, boundary = inside.
+
+    Longitudes are unwrapped into the ring's OWN frame — anchored on its first vertex,
+    add/subtract 360 — so a home-station fence straddling +-180 (or written with >180
+    longitudes) stays a contiguous narrow band, then the test point is shifted into the
+    same frame before the cast. Anchoring on the ring rather than the test point is
+    deliberate: anchoring on the point would inflate a seam-straddling ring to nearly
+    the whole globe and report far-away points inside. The ring need not be explicitly
+    closed (last->first edge always tested). A point exactly on an edge counts as
+    inside (deterministic; avoids flapping for a track parked on a border). Uses only
+    the first two ordinates of each [lon,lat,(alt)] position.
+    """
+    n = len(ring)
+    if n < 3:
+        return False
+
+    anchor = ring[0][0]
+
+    def _unwrap(vlon: float) -> float:
+        # Shift a longitude to within 180 deg of the ring anchor so an edge spanning
+        # the antimeridian (or a fence written with >180 longitudes) tests against a
+        # contiguous longitude axis rather than wrapping the wrong way.
+        delta = vlon - anchor
+        if delta > 180.0:
+            return vlon - 360.0
+        if delta < -180.0:
+            return vlon + 360.0
+        return vlon
+
+    x = _unwrap(lon)  # the test point, into the ring's frame
+    inside = False
+    j = n - 1
+    xj, yj = _unwrap(ring[j][0]), ring[j][1]
+    for i in range(n):
+        xi, yi = _unwrap(ring[i][0]), ring[i][1]
+        # On-edge test: collinear with the [i, j] segment and within its bounds → inside.
+        if _on_segment(x, lat, xi, yi, xj, yj):
+            return True
+        # Standard even-odd crossing of the horizontal ray to +inf in longitude.
+        if (yi > lat) != (yj > lat):
+            x_cross = xi + (lat - yi) / (yj - yi) * (xj - xi)
+            if x < x_cross:
+                inside = not inside
+        xj, yj = xi, yi
+    return inside
+
+
+def _on_segment(px: float, py: float, ax: float, ay: float, bx: float, by: float) -> bool:
+    """Whether ``(px, py)`` lies on the segment ``(ax, ay)``–``(bx, by)`` (planar).
+
+    A small epsilon on the cross-product tolerates float rounding so a vertex/edge
+    point reads as on-boundary; the bounding-box guard keeps it to the segment, not
+    the infinite line. Operates in the already-unwrapped longitude frame.
+    """
+    cross = (bx - ax) * (py - ay) - (by - ay) * (px - ax)
+    if abs(cross) > 1e-12:
+        return False
+    if min(ax, bx) - 1e-12 <= px <= max(ax, bx) + 1e-12:
+        if min(ay, by) - 1e-12 <= py <= max(ay, by) + 1e-12:
+            return True
+    return False
+
+
+def point_in_polygon(lon: float, lat: float, polygon: Polygon) -> bool:
+    """RFC-7946 containment: inside exterior ring (coordinates[0]) AND outside every
+    hole (coordinates[1:]). Empty coordinates -> False."""
+    rings = polygon.coordinates
+    if not rings:
+        return False
+    if not point_in_ring(lon, lat, rings[0]):
+        return False
+    for hole in rings[1:]:
+        if point_in_ring(lon, lat, hole):
+            return False
+    return True
+
+
+def point_in_circle(lon: float, lat: float, center: Position, radius_m: float) -> bool:
+    """True haversine containment: haversine_m(point, center) <= radius_m (inclusive)."""
+    return haversine_m(lon, lat, center[0], center[1]) <= radius_m
+
+
+def in_altitude_band(alt_m: float | None, min_m: float | None, max_m: float | None) -> bool:
+    """Inclusive [min, max] membership; an unset bound is open on that side.
+
+    Both bounds None -> True (no band constraint, even when alt_m is None). If EITHER
+    bound is set and alt_m is None -> False (a missing altitude cannot be proven
+    in-band; honest-conservative, NOT 'unknown' — see decision on altitude bands).
+    """
+    if min_m is None and max_m is None:
+        return True
+    if alt_m is None:
+        return False
+    if min_m is not None and alt_m < min_m:
+        return False
+    if max_m is not None and alt_m > max_m:
+        return False
+    return True
+
+
+def geofence_contains(gf: Geofence, lon: float, lat: float, alt_m: float | None) -> bool:
+    """True iff (lon,lat) is inside gf's authoritative shape AND alt_m is in its band.
+
+    CircleShape -> point_in_circle(center, radius_m); PolygonShape -> point_in_polygon.
+    Then AND in_altitude_band(alt_m, gf.min_altitude_m, gf.max_altitude_m).
+    """
+    shape = gf.shape
+    if isinstance(shape, CircleShape):
+        horizontal = point_in_circle(lon, lat, shape.center, shape.radius_m)
+    else:
+        horizontal = point_in_polygon(lon, lat, shape.polygon)
+    return horizontal and in_altitude_band(alt_m, gf.min_altitude_m, gf.max_altitude_m)
+
+
+def geofence_reference_point(gf: Geofence) -> Position:
+    """The point distance_* measures to for a geofence: a circle's center, or a
+    polygon's exterior-ring vertex mean (a stable, cheap 'center'; distance-to-polygon
+    is documented as a coarse proximity). Used by the evaluator, which may cache it per
+    synced geofence."""
+    shape = gf.shape
+    if isinstance(shape, CircleShape):
+        return [shape.center[0], shape.center[1]]
+    ring = shape.polygon.coordinates[0] if shape.polygon.coordinates else []
+    if not ring:
+        return [0.0, 0.0]
+    n = float(len(ring))
+    # Circular mean for longitude (latitude never wraps at home-station scale): a plain
+    # arithmetic mean collapses to the antipode for a fence straddling +-180, so average
+    # on the unit circle via atan2 of the summed sines/cosines instead.
+    sin_sum = sum(math.sin(math.radians(v[0])) for v in ring)
+    cos_sum = sum(math.cos(math.radians(v[0])) for v in ring)
+    mean_lon = math.degrees(math.atan2(sin_sum, cos_sum))
+    mean_lat = sum(v[1] for v in ring) / n
+    return [mean_lon, mean_lat]
+
+
+def elevation_angle_deg(
+    ground_distance_m: float, altitude_m: float, *, observer_alt_m: float = 0.0
+) -> float:
+    """Observer->target elevation above local horizontal, degrees: atan2(h, ground).
+
+    Flat-local tangent model, adequate at home-station range (PRD §16.2); Earth
+    curvature intentionally ignored. h = altitude_m - observer_alt_m may be negative
+    (target below observer -> negative angle). ground_distance_m == 0 with positive h
+    -> +90. observer_alt_m defaults 0.0 (no station-altitude config exists yet)."""
+    h = altitude_m - observer_alt_m
+    return math.degrees(math.atan2(h, ground_distance_m))

@@ -1,0 +1,452 @@
+"""Contextual alert operators driven through the engine (M4.6c, PRD §20.2/§12 #6/#7).
+
+Each operator is exercised end-to-end through :class:`aether.alerts.engine.AlertEngine`
+— not the evaluator in isolation — so the test pins the *whole* firing model: the
+contextual evaluator collapses a rule to a ``(level, discrete)`` and the engine's
+existing transition/cooldown/dedup/auto-resolve path produces the alerts. An injected
+clock + deterministic id factory keep edges/cooldown deterministic; records are real
+schema-v2 tracks/events (dumped through ``dump_record`` like the condition core).
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+import pytest
+
+from aether.alerts import contextual
+from aether.alerts.contextual import ContextualEvaluator, StationRef
+from aether.alerts.engine import AlertEngine
+from aether.schema.alert_rule import AlertCondition, AlertRule, AlertRuleCreate
+from aether.schema.geofence import CircleShape, Geofence, GeofenceCreate
+from aether.schema.geometry import Point
+from aether.schema.records import EventRecord, Record, TrackRecord
+from aether.state.live import StateChange
+
+T0 = datetime(2026, 6, 19, 12, 0, 0, tzinfo=UTC)
+
+# A station near the demo aircraft cluster, so station-relative leaves have a real
+# reference (0,0 would be unconfigured → unevaluable).
+STATION_LON, STATION_LAT = -95.0, 40.0
+
+
+class _Clock:
+    def __init__(self, t: datetime) -> None:
+        self.t = t
+
+    def __call__(self) -> datetime:
+        return self.t
+
+
+def _id_factory() -> Any:
+    counter = {"n": 0}
+
+    def make() -> str:
+        counter["n"] += 1
+        return f"alert-{counter['n']}"
+
+    return make
+
+
+def _engine(
+    clock: _Clock,
+    rules: list[AlertRule],
+    *,
+    geofences: list[Geofence] | None = None,
+    station_lat: float = STATION_LAT,
+    station_lon: float = STATION_LON,
+) -> AlertEngine:
+    engine = AlertEngine(
+        clock=clock, id_factory=_id_factory(), station_lat=station_lat, station_lon=station_lon
+    )
+    engine.set_rules(rules)
+    if geofences:
+        engine.set_geofences(geofences)
+    return engine
+
+
+def _rule(*, id: str = "rule-x", **kw: Any) -> AlertRule:
+    body = AlertRuleCreate(
+        name=kw.pop("name", "Test rule"),
+        severity=kw.pop("severity", "high"),
+        subject_types=kw.pop("subject_types", ["aircraft"]),
+        conditions=kw.pop("conditions", []),
+        channels=kw.pop("channels", ["dashboard"]),
+        **kw,
+    )
+    return AlertRule.create(body, id=id, now=T0)
+
+
+def _circle(id: str = "gf-ring", *, center: tuple[float, float] = (-95.0, 40.0)) -> Geofence:
+    return Geofence.create(
+        GeofenceCreate(name="ring", shape=CircleShape(center=list(center), radius_m=5000.0)),
+        id=id,
+        now=T0,
+    )
+
+
+def _track(
+    lon: float,
+    lat: float,
+    *,
+    alt_m: float | None = 3000.0,
+    geometry: bool = True,
+    id: str = "aircraft:icao:abc",
+    attrs: dict[str, Any] | None = None,
+) -> TrackRecord:
+    return TrackRecord(
+        id=id,
+        source="local_adsb",
+        observed_at=T0,
+        received_at=T0,
+        published_at=T0,
+        correlation_key=id,
+        track_type="aircraft",
+        geometry=Point(coordinates=[lon, lat, alt_m if alt_m is not None else 0.0])
+        if geometry
+        else None,
+        altitude_m=alt_m,
+        locally_received=True,
+        attributes=attrs or {},
+    )
+
+
+def _change(record: Record, *, op: str | None = None) -> StateChange:
+    if isinstance(record, TrackRecord):
+        kind, op = "track", op or "upsert"
+    elif isinstance(record, EventRecord):
+        kind, op = "event", op or "event"
+    else:  # pragma: no cover
+        raise AssertionError(record)
+    return StateChange(seq=1, op=op, kind=kind, id=record.id, record=record)  # type: ignore[arg-type]
+
+
+def _event(*, attrs: dict[str, Any], id: str = "evt-1") -> EventRecord:
+    return EventRecord(
+        id=id,
+        source="local_adsb",
+        observed_at=T0,
+        received_at=T0,
+        published_at=T0,
+        event_type="aircraft",
+        subject_id="aircraft:icao:abc",
+        summary="x",
+        attributes=attrs,
+    )
+
+
+# --- geofence enter / exit ----------------------------------------------------
+
+
+def test_entered_geofence_fires_once_dedups_and_auto_resolves() -> None:
+    clock = _Clock(T0)
+    rule = _rule(
+        conditions=[AlertCondition(field="geometry", operator="entered_geofence")],
+        geofence_id="gf-ring",
+        transition="enter",
+    )
+    engine = _engine(clock, [rule], geofences=[_circle()])
+
+    out = engine.evaluate(_change(_track(-95.0, 40.0)))  # inside
+    assert len(out) == 1 and out[0].state == "open"
+    assert engine.evaluate(_change(_track(-95.0, 40.0))) == []  # still inside → dedup
+
+    clock.t = T0 + timedelta(seconds=30)
+    resolved = engine.evaluate(_change(_track(-90.0, 40.0)))  # left
+    assert len(resolved) == 1 and resolved[0].state == "resolved"
+
+    # A second, never-inside track does not fire.
+    assert engine.evaluate(_change(_track(-80.0, 40.0, id="aircraft:icao:other"))) == []
+
+
+def test_exited_geofence_fires_when_track_leaves() -> None:
+    clock = _Clock(T0)
+    rule = _rule(
+        conditions=[AlertCondition(field="geometry", operator="exited_geofence")],
+        geofence_id="gf-ring",
+        transition="enter",  # the exited level is negated containment; enter rides it
+    )
+    engine = _engine(clock, [rule], geofences=[_circle()])
+    # Inside → exited level False → no fire.
+    assert engine.evaluate(_change(_track(-95.0, 40.0))) == []
+    # Outside → exited level True → fires.
+    out = engine.evaluate(_change(_track(-90.0, 40.0)))
+    assert len(out) == 1 and out[0].state == "open"
+
+
+# --- distance -----------------------------------------------------------------
+
+
+def test_distance_below_against_station() -> None:
+    clock = _Clock(T0)
+    rule = _rule(
+        conditions=[AlertCondition(field="geometry", operator="distance_below", threshold=10000.0)],
+        transition="enter",
+    )
+    engine = _engine(clock, [rule])
+    # On the station → distance 0 < 10 km → fires.
+    out = engine.evaluate(_change(_track(STATION_LON, STATION_LAT)))
+    assert len(out) == 1 and out[0].state == "open"
+
+
+def test_distance_above_against_geofence_center() -> None:
+    clock = _Clock(T0)
+    rule = _rule(
+        conditions=[AlertCondition(field="geometry", operator="distance_above", threshold=50000.0)],
+        geofence_id="gf-ring",
+        transition="enter",
+    )
+    engine = _engine(clock, [rule], geofences=[_circle(center=(-95.0, 40.0))])
+    # Far from the geofence center (~85 km east) → above 50 km → fires.
+    out = engine.evaluate(_change(_track(-94.0, 40.0)))
+    assert len(out) == 1 and out[0].state == "open"
+
+
+# --- elevation ----------------------------------------------------------------
+
+
+def test_elevation_crossed_fires_above_threshold() -> None:
+    clock = _Clock(T0)
+    rule = _rule(
+        conditions=[AlertCondition(field="geometry", operator="elevation_crossed", threshold=80.0)],
+        transition="enter",
+    )
+    engine = _engine(clock, [rule])
+    # Nearly overhead the station at altitude → high elevation angle → fires.
+    out = engine.evaluate(_change(_track(STATION_LON, STATION_LAT, alt_m=5000.0)))
+    assert len(out) == 1 and out[0].state == "open"
+
+
+def test_elevation_unevaluable_without_altitude() -> None:
+    clock = _Clock(T0)
+    rule = _rule(
+        conditions=[AlertCondition(field="geometry", operator="elevation_crossed", threshold=10.0)],
+        transition="enter",
+    )
+    engine = _engine(clock, [rule])
+    assert engine.evaluate(_change(_track(STATION_LON, STATION_LAT, alt_m=None))) == []
+
+
+# --- count within window ------------------------------------------------------
+
+
+def test_count_within_window_reaches_n_then_drains() -> None:
+    clock = _Clock(T0)
+    rule = _rule(
+        conditions=[
+            AlertCondition(field="id", operator="count_within_window", threshold=3.0, window_s=60.0)
+        ],
+        transition="enter",
+    )
+    engine = _engine(clock, [rule])
+    assert engine.evaluate(_change(_track(-95.0, 40.0))) == []  # count 1
+    assert engine.evaluate(_change(_track(-95.0, 40.0))) == []  # count 2
+    out = engine.evaluate(_change(_track(-95.0, 40.0)))  # count 3 → fires
+    assert len(out) == 1 and out[0].state == "open"
+
+    # Let the window drain (advance past window_s with no new hits) → auto-resolve.
+    clock.t = T0 + timedelta(seconds=120)
+    resolved = engine.evaluate(_change(_track(-95.0, 40.0)))  # only this one in window → 1 < 3
+    assert len(resolved) == 1 and resolved[0].state == "resolved"
+
+
+def test_count_within_window_counts_only_qualifying_observations() -> None:
+    # count ANDed with a stateless equals leaf: only observations that ALSO satisfy the
+    # equals leaf count toward the window (qualifying observations, not raw ticks).
+    clock = _Clock(T0)
+    rule = _rule(
+        conditions=[
+            AlertCondition(field="attributes.squawk", operator="equals", value="7700"),
+            AlertCondition(
+                field="id", operator="count_within_window", threshold=2.0, window_s=60.0
+            ),
+        ],
+        transition="enter",
+        cooldown_s=0.0,
+    )
+    engine = _engine(clock, [rule])
+    # Non-qualifying squawk does not advance the count (raw counting would have).
+    assert engine.evaluate(_change(_track(-95.0, 40.0, attrs={"squawk": "1200"}))) == []
+    assert engine.evaluate(_change(_track(-95.0, 40.0, attrs={"squawk": "1200"}))) == []
+    assert engine.evaluate(_change(_track(-95.0, 40.0, attrs={"squawk": "7700"}))) == []  # qual 1<2
+    out = engine.evaluate(
+        _change(_track(-95.0, 40.0, attrs={"squawk": "7700"}))
+    )  # qual 2≥2 → fires
+    assert len(out) == 1 and out[0].state == "open"
+
+
+def test_count_state_unpolluted_by_unevaluable_ticks() -> None:
+    # count ANDed with a geofence leaf: while the geofence is unsynced the rule is
+    # unevaluable, and those ticks neither fire nor pollute the window (finding-E
+    # hygiene). Once the fence is synced, only the qualifying (inside) sightings count.
+    clock = _Clock(T0)
+    rule = _rule(
+        conditions=[
+            AlertCondition(field="geometry", operator="entered_geofence"),
+            AlertCondition(
+                field="id", operator="count_within_window", threshold=2.0, window_s=60.0
+            ),
+        ],
+        geofence_id="gf-ring",
+        transition="enter",
+        cooldown_s=0.0,
+    )
+    engine = _engine(clock, [rule])  # no geofence synced yet → unevaluable
+    assert engine.evaluate(_change(_track(-95.0, 40.0))) == []
+    assert engine.evaluate(_change(_track(-95.0, 40.0))) == []
+    engine.set_geofences([_circle()])  # now inside-observations qualify and count
+    assert engine.evaluate(_change(_track(-95.0, 40.0))) == []  # qualifying count 1 < 2
+    out = engine.evaluate(_change(_track(-95.0, 40.0)))  # count 2 ≥ 2 → fires
+    assert len(out) == 1 and out[0].state == "open"
+
+
+# --- changed_to / changed_from ------------------------------------------------
+
+
+def test_changed_to_suppresses_first_obs_then_fires_on_transition() -> None:
+    clock = _Clock(T0)
+    rule = _rule(
+        conditions=[AlertCondition(field="attributes.squawk", operator="changed_to", value="7700")],
+        transition="change",
+        cooldown_s=0.0,
+    )
+    engine = _engine(clock, [rule])
+    # First observation, already at 7700 → suppressed (initial sighting is not a change).
+    assert engine.evaluate(_change(_track(-95.0, 40.0, attrs={"squawk": "1200"}))) == []
+    # A real transition 1200 → 7700 fires (discrete).
+    out = engine.evaluate(_change(_track(-95.0, 40.0, attrs={"squawk": "7700"})))
+    assert len(out) == 1 and out[0].state == "open"
+
+
+def test_changed_from_fires_when_leaving_value() -> None:
+    clock = _Clock(T0)
+    rule = _rule(
+        conditions=[
+            AlertCondition(field="attributes.squawk", operator="changed_from", value="7700")
+        ],
+        transition="change",
+        cooldown_s=0.0,
+    )
+    engine = _engine(clock, [rule])
+    assert engine.evaluate(_change(_track(-95.0, 40.0, attrs={"squawk": "7700"}))) == []  # first
+    out = engine.evaluate(_change(_track(-95.0, 40.0, attrs={"squawk": "1200"})))  # left 7700
+    assert len(out) == 1 and out[0].state == "open"
+
+
+# --- unevaluable degradation --------------------------------------------------
+
+
+def test_unknown_geofence_id_does_not_fire() -> None:
+    clock = _Clock(T0)
+    rule = _rule(
+        conditions=[AlertCondition(field="geometry", operator="entered_geofence")],
+        geofence_id="gf-missing",
+        transition="enter",
+    )
+    engine = _engine(clock, [rule], geofences=[_circle()])  # different id synced
+    assert engine.evaluate(_change(_track(-95.0, 40.0))) == []
+
+
+def test_geometry_leaf_unevaluable_without_geometry() -> None:
+    clock = _Clock(T0)
+    rule = _rule(
+        conditions=[AlertCondition(field="geometry", operator="distance_below", threshold=1e9)],
+        transition="enter",
+    )
+    engine = _engine(clock, [rule])
+    assert engine.evaluate(_change(_track(0.0, 0.0, geometry=False))) == []
+
+
+def test_distance_unevaluable_at_null_island_station() -> None:
+    clock = _Clock(T0)
+    rule = _rule(
+        conditions=[AlertCondition(field="geometry", operator="distance_below", threshold=1e9)],
+        transition="enter",
+    )
+    engine = _engine(clock, [rule], station_lat=0.0, station_lon=0.0)
+    assert engine.evaluate(_change(_track(-95.0, 40.0))) == []
+
+
+def test_event_geometry_leaf_unevaluable() -> None:
+    clock = _Clock(T0)
+    rule = _rule(
+        subject_types=["aircraft"],
+        conditions=[AlertCondition(field="geometry", operator="distance_below", threshold=1e9)],
+        transition="enter",
+    )
+    engine = _engine(clock, [rule])
+    # An event has no track point → geometry leaf unevaluable → no fire.
+    assert engine.evaluate(_change(_event(attrs={}))) == []
+
+
+# --- pruning ------------------------------------------------------------------
+
+
+def test_track_remove_forgets_contextual_state() -> None:
+    clock = _Clock(T0)
+    rule = _rule(
+        conditions=[AlertCondition(field="attributes.squawk", operator="changed_to", value="7700")],
+        transition="change",
+        cooldown_s=0.0,
+    )
+    engine = _engine(clock, [rule])
+    engine.evaluate(_change(_track(-95.0, 40.0, attrs={"squawk": "1200"})))  # first, baseline set
+    engine.evaluate(StateChange(1, "remove", "track", "aircraft:icao:abc", None))
+    # After forgetting, the next observation is again a first_obs → suppressed even
+    # though it arrives directly as 7700 (no remembered 1200 baseline).
+    assert engine.evaluate(_change(_track(-95.0, 40.0, attrs={"squawk": "7700"}))) == []
+
+
+def test_remove_rule_drops_contextual_state() -> None:
+    clock = _Clock(T0)
+    rule = _rule(
+        conditions=[AlertCondition(field="geometry", operator="entered_geofence")],
+        geofence_id="gf-ring",
+        transition="enter",
+    )
+    engine = _engine(clock, [rule], geofences=[_circle()])
+    engine.evaluate(_change(_track(-95.0, 40.0)))
+    engine.remove_rule(rule.id)
+    assert engine.rule_count == 0
+    assert engine.evaluate(_change(_track(-90.0, 40.0))) == []
+
+
+def test_upsert_rule_rebaselines_contextual_state() -> None:
+    # An edit via upsert re-baselines a rule's contextual state (symmetric with
+    # remove_rule/set_rules): the next observation of each subject reads as a fresh
+    # first sighting, so a stale prior value can't fire a spurious changed_* transition.
+    clock = _Clock(T0)
+    rule = _rule(
+        conditions=[AlertCondition(field="attributes.squawk", operator="changed_to", value="7700")],
+        transition="change",
+        cooldown_s=0.0,
+    )
+    engine = _engine(clock, [rule])
+    engine.evaluate(_change(_track(-95.0, 40.0, attrs={"squawk": "1200"})))  # baseline 1200
+    engine.upsert_rule(rule)  # an edit → re-baseline
+    # The 1200 baseline is gone, so arriving directly at 7700 reads as a first obs.
+    assert engine.evaluate(_change(_track(-95.0, 40.0, attrs={"squawk": "7700"}))) == []
+    # A genuine later transition (1200 → 7700) still fires.
+    engine.evaluate(_change(_track(-95.0, 40.0, attrs={"squawk": "1200"})))
+    out = engine.evaluate(_change(_track(-95.0, 40.0, attrs={"squawk": "7700"})))
+    assert len(out) == 1 and out[0].state == "open"
+
+
+def test_contextual_state_is_bounded_by_lru_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The per-subject state map is a runaway backstop (PRD §37): at the cap, inserting a
+    # new subject evicts the least-recently-used. Patch the cap low to exercise eviction
+    # without 50k inserts; re-touching a subject keeps it (LRU, not FIFO).
+    monkeypatch.setattr(contextual, "_MAX_SUBJECT_STATES", 2)
+    ev = ContextualEvaluator(station=StationRef(lon=STATION_LON, lat=STATION_LAT, configured=True))
+    rule = _rule(
+        conditions=[
+            AlertCondition(field="id", operator="count_within_window", threshold=1.0, window_s=60.0)
+        ],
+    )
+    track = _track(-95.0, 40.0)
+    ev.evaluate(rule, "subj-A", track, {}, T0)
+    ev.evaluate(rule, "subj-B", track, {}, T0)
+    ev.evaluate(rule, "subj-A", track, {}, T0)  # re-touch A → most-recently-used
+    ev.evaluate(rule, "subj-C", track, {}, T0)  # over cap → evict the LRU (subj-B)
+    assert {key[1] for key in ev._state} == {"subj-A", "subj-C"}
