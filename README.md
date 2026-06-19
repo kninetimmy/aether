@@ -44,8 +44,10 @@ The repo carries no secrets, callsign, or station coordinates — each operator 
 
 ## Status
 
-Milestones **M1 (COP core) → M3 (network fusion)** are complete; SQLite persistence, the alert engine, and
-replay arrive in **M4**. Live state is currently in-memory only. Working today:
+Milestones **M1 (COP core) → M3 (network fusion)** are complete, and **M4 (alerts & history)** is in
+progress: SQLite persistence with track history and a retention manager have landed; the alert engine and
+replay are next. Live state is served from memory — persistence is a sibling consumer that never gates it.
+Working today:
 
 **Core**
 - **Schema v2** — a Pydantic v2 discriminated record union (track / geo-feature / event / alert /
@@ -69,6 +71,13 @@ replay arrive in **M4**. Live state is currently in-memory only. Working today:
 - **AIS vessels** — AISStream.io secure-WebSocket feed, merged per MMSI.
 - **Military Mode-S classification** — an honest, two-basis (provider DB flag + operator-supplied ICAO
   address blocks) classifier shared by both ADS-B adapters; never stated as certain.
+
+**Persistence** (M4, opt-in via `AETHER_PERSIST=1`; never gates serving live state)
+- **Track history** — fused track observations written to SQLite (WAL, versioned migrations) by an
+  independent bus consumer with a bounded write queue that drops rather than back-pressures the bus.
+- **Retention manager** — enforces the 30-day window and the `AETHER_DB_MAX_GB` / `AETHER_MIN_FREE_DISK_GB`
+  limits via a storage-pressure ladder (downsample → delete oldest → shorten retention → VACUUM), emitting a
+  health warning + system event under pressure. Disk limits override time retention.
 
 See the milestone roadmap (M0–M7) in [`CLAUDE.md`](CLAUDE.md) §4 and the exit criteria in `PRD.md` §32–33.
 
@@ -281,6 +290,14 @@ Defaults shown in parentheses. Each source also accepts `*_POLL_S` / `*_THROTTLE
 | `AETHER_AIS_TLS` | `1` | `wss` (real). Set `0` only for the plain-`ws` fake feeder. |
 | `AETHER_AIS_HOST` / `_PORT` / `_PATH` | `stream.aisstream.io` / `443` / `/v0/stream` | AISStream endpoint. |
 | `AETHER_AIS_LAT` / `_LON` / `_RADIUS_NM` | station / station / `500` | AOI bounding box. |
+| `AETHER_PERSIST` | `0` | Persist tracks to SQLite. A sibling consumer — never gates serving live state. |
+| `AETHER_DB_PATH` | `aether.db` | SQLite store path (`-wal`/`-shm` sidecars sit alongside). |
+| `AETHER_PERSIST_QUEUE_MAX` | `10000` | Bounded write queue; a full queue drops records, never back-pressures the bus. |
+| `AETHER_RETENTION_DAYS` | `30` | Retention window. Observations older than this are deleted each sweep. |
+| `AETHER_DB_MAX_GB` | `0` (off) | Size budget (DB + WAL). Over it, the storage-pressure ladder reclaims space. |
+| `AETHER_MIN_FREE_DISK_GB` | `0` (off) | Free-disk floor. Crossing it is critical pressure; aether sheds its own oldest data. |
+| `AETHER_RETENTION_INTERVAL_S` | `3600` | How often the retention sweep runs. |
+| `AETHER_DB_HIGH_WATER` / `_CRITICAL_WATER` | `0.85` / `0.95` | Fractions of `DB_MAX_GB` where the ladder engages / escalates. |
 
 ---
 

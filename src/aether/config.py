@@ -136,6 +136,30 @@ DEFAULT_DB_PATH = "aether.db"
 #: a full queue drops records rather than back-pressuring the bus.
 DEFAULT_PERSIST_QUEUE_MAX = 10000
 
+#: Retention window (PRD §19.4 target = 30 days). Observations older than this are
+#: deleted on each retention sweep; storage pressure may shorten the *effective*
+#: window below this (ladder step 5). Set very high to effectively disable time
+#: retention — bounded retention is still the PRD intent, so it never goes off.
+DEFAULT_RETENTION_DAYS = 30
+#: Hard size budget for the SQLite store (main file + ``-wal``/``-shm`` sidecars),
+#: in GiB (PRD §19.4 ``AETHER_DB_MAX_GB``). ``0`` disables the size cap, leaving
+#: only time retention. When exceeded, the storage-pressure ladder reclaims space.
+DEFAULT_DB_MAX_GB = 0.0
+#: Minimum free space to keep on the store's filesystem, in GiB (PRD §19.4
+#: ``AETHER_MIN_FREE_DISK_GB``). ``0`` disables the free-disk floor. Crossing it is
+#: treated as critical pressure — aether sheds its own oldest data and warns, but
+#: cannot reclaim space held by other files (honest-labeling).
+DEFAULT_MIN_FREE_DISK_GB = 0.0
+#: How often the retention sweep runs (PRD §19.4). One hour balances responsiveness
+#: against sweep cost; each sweep is exception-isolated so a bad pass never wedges
+#: the loop, and it never gates serving live state (PRD §5).
+DEFAULT_RETENTION_INTERVAL_S = 3600.0
+#: Fractions of ``AETHER_DB_MAX_GB`` at which the storage-pressure ladder engages
+#: (high-water) and escalates to deleting non-expired data + shortening retention
+#: (critical-water) — PRD §19.4 "High-water and critical-water marks".
+DEFAULT_DB_HIGH_WATER = 0.85
+DEFAULT_DB_CRITICAL_WATER = 0.95
+
 
 #: Canonical station location (PRD §5/§16.2). The ONE home position the whole app
 #: shares: the default per-connection websocket bbox (PRD §16.3a), the frontend
@@ -254,6 +278,18 @@ class Settings:
     db_path: str = DEFAULT_DB_PATH
     persist_queue_max: int = DEFAULT_PERSIST_QUEUE_MAX
 
+    #: Retention manager (M4.2, PRD §19.4). Runs as a sibling of the persistence
+    #: writer (only when ``persist`` is on) on its own DB connection, so a sweep —
+    #: including a VACUUM — never gates serving live state (PRD §5). Enforces the
+    #: ``retention_days`` window always, and the ``db_max_gb`` / ``min_free_disk_gb``
+    #: limits via the storage-pressure ladder; ``*_water`` marks set when it engages.
+    retention_days: int = DEFAULT_RETENTION_DAYS
+    db_max_gb: float = DEFAULT_DB_MAX_GB
+    min_free_disk_gb: float = DEFAULT_MIN_FREE_DISK_GB
+    retention_interval_s: float = DEFAULT_RETENTION_INTERVAL_S
+    db_high_water: float = DEFAULT_DB_HIGH_WATER
+    db_critical_water: float = DEFAULT_DB_CRITICAL_WATER
+
     @classmethod
     def from_env(cls) -> "Settings":
         # Resolve the canonical station first; the per-adapter AOI centers default
@@ -346,5 +382,17 @@ class Settings:
             db_path=os.environ.get("AETHER_DB_PATH", DEFAULT_DB_PATH),
             persist_queue_max=int(
                 os.environ.get("AETHER_PERSIST_QUEUE_MAX", DEFAULT_PERSIST_QUEUE_MAX)
+            ),
+            retention_days=int(os.environ.get("AETHER_RETENTION_DAYS", DEFAULT_RETENTION_DAYS)),
+            db_max_gb=float(os.environ.get("AETHER_DB_MAX_GB", DEFAULT_DB_MAX_GB)),
+            min_free_disk_gb=float(
+                os.environ.get("AETHER_MIN_FREE_DISK_GB", DEFAULT_MIN_FREE_DISK_GB)
+            ),
+            retention_interval_s=float(
+                os.environ.get("AETHER_RETENTION_INTERVAL_S", DEFAULT_RETENTION_INTERVAL_S)
+            ),
+            db_high_water=float(os.environ.get("AETHER_DB_HIGH_WATER", DEFAULT_DB_HIGH_WATER)),
+            db_critical_water=float(
+                os.environ.get("AETHER_DB_CRITICAL_WATER", DEFAULT_DB_CRITICAL_WATER)
             ),
         )
