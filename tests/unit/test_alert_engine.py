@@ -172,7 +172,9 @@ def test_enter_fires_once_then_dedups_while_condition_holds() -> None:
     assert alert.rule_id == rule.id
     assert alert.subject_id == "aircraft:icao:abc"
     assert alert.severity == "high"
-    assert alert.delivery_status == {"dashboard": "pending"}
+    # dashboard is the in-app alert centre: delivered by the alert reaching live
+    # state, so the engine stamps it ``delivered`` at creation (no dispatcher needed).
+    assert alert.delivery_status == {"dashboard": "delivered"}
 
     # Still matching → no second alert (the open one dedups).
     assert engine.evaluate(_change(_aircraft(squawk="7700"))) == []

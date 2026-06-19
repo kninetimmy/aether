@@ -181,6 +181,15 @@ DEFAULT_RETENTION_INTERVAL_S = 3600.0
 DEFAULT_DB_HIGH_WATER = 0.85
 DEFAULT_DB_CRITICAL_WATER = 0.95
 
+#: Per-channel minimum severity to deliver a notification (M4.7, PRD §20.5). An
+#: alert is delivered on a channel only when its severity meets the channel's
+#: threshold; below it the channel resolves to ``suppressed``. ``info`` (the default)
+#: delivers everything. ``dashboard`` has no threshold — the alert centre records
+#: every alert. Applies to the browser channel now; email/discord drivers in M4.7b.
+DEFAULT_NOTIFY_BROWSER_MIN_SEVERITY = "info"
+DEFAULT_NOTIFY_EMAIL_MIN_SEVERITY = "info"
+DEFAULT_NOTIFY_DISCORD_MIN_SEVERITY = "info"
+
 #: Hard cap on observations returned by one ``/api/v2/tracks/{id}/history`` request
 #: (M4.3, PRD §21.3/§11.15). The request's ``limit`` query param defaults to and is
 #: clamped to this, bounding response size + read cost on the Pi (PRD §37); the
@@ -336,6 +345,15 @@ class Settings:
     #: ``history_max_points`` caps one response (the ``truncated`` flag signals a hit).
     history_max_points: int = DEFAULT_HISTORY_MAX_POINTS
 
+    #: Per-channel notification severity thresholds (M4.7, PRD §20.5). The
+    #: :class:`~aether.alerts.notify.NotificationDispatcher` delivers an alert on a
+    #: channel only when its severity meets the channel threshold; below it the
+    #: channel resolves to ``suppressed``. ``info`` ⇒ deliver everything. The browser
+    #: threshold is honored now; email/discord thresholds gate their drivers in M4.7b.
+    notify_browser_min_severity: str = DEFAULT_NOTIFY_BROWSER_MIN_SEVERITY
+    notify_email_min_severity: str = DEFAULT_NOTIFY_EMAIL_MIN_SEVERITY
+    notify_discord_min_severity: str = DEFAULT_NOTIFY_DISCORD_MIN_SEVERITY
+
     @classmethod
     def from_env(cls) -> "Settings":
         # Resolve the canonical station first; the per-adapter AOI centers default
@@ -463,5 +481,14 @@ class Settings:
             ),
             history_max_points=int(
                 os.environ.get("AETHER_HISTORY_MAX_POINTS", DEFAULT_HISTORY_MAX_POINTS)
+            ),
+            notify_browser_min_severity=os.environ.get(
+                "AETHER_NOTIFY_BROWSER_MIN_SEVERITY", DEFAULT_NOTIFY_BROWSER_MIN_SEVERITY
+            ),
+            notify_email_min_severity=os.environ.get(
+                "AETHER_NOTIFY_EMAIL_MIN_SEVERITY", DEFAULT_NOTIFY_EMAIL_MIN_SEVERITY
+            ),
+            notify_discord_min_severity=os.environ.get(
+                "AETHER_NOTIFY_DISCORD_MIN_SEVERITY", DEFAULT_NOTIFY_DISCORD_MIN_SEVERITY
             ),
         )
