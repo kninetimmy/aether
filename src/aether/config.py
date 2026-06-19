@@ -181,6 +181,14 @@ DEFAULT_RETENTION_INTERVAL_S = 3600.0
 DEFAULT_DB_HIGH_WATER = 0.85
 DEFAULT_DB_CRITICAL_WATER = 0.95
 
+#: Hard cap on observations returned by one ``/api/v2/tracks/{id}/history`` request
+#: (M4.3, PRD §21.3/§11.15). The request's ``limit`` query param defaults to and is
+#: clamped to this, bounding response size + read cost on the Pi (PRD §37); the
+#: response flags ``truncated`` when the cap is hit so a capped trail is never
+#: mistaken for a complete one (no silent caps). The read is served on a fresh
+#: read-only connection per request and never gates serving live state (PRD §5).
+DEFAULT_HISTORY_MAX_POINTS = 10000
+
 
 #: Canonical station location (PRD §5/§16.2). The ONE home position the whole app
 #: shares: the default per-connection websocket bbox (PRD §16.3a), the frontend
@@ -322,6 +330,12 @@ class Settings:
     db_high_water: float = DEFAULT_DB_HIGH_WATER
     db_critical_water: float = DEFAULT_DB_CRITICAL_WATER
 
+    #: Track-history read API (M4.3, PRD §21.3/§11.15). ``GET /api/v2/tracks/{id}/
+    #: history`` reads the persistence store on a fresh read-only connection per
+    #: request, so a slow/locked store can never gate serving live state (PRD §5).
+    #: ``history_max_points`` caps one response (the ``truncated`` flag signals a hit).
+    history_max_points: int = DEFAULT_HISTORY_MAX_POINTS
+
     @classmethod
     def from_env(cls) -> "Settings":
         # Resolve the canonical station first; the per-adapter AOI centers default
@@ -446,5 +460,8 @@ class Settings:
             db_high_water=float(os.environ.get("AETHER_DB_HIGH_WATER", DEFAULT_DB_HIGH_WATER)),
             db_critical_water=float(
                 os.environ.get("AETHER_DB_CRITICAL_WATER", DEFAULT_DB_CRITICAL_WATER)
+            ),
+            history_max_points=int(
+                os.environ.get("AETHER_HISTORY_MAX_POINTS", DEFAULT_HISTORY_MAX_POINTS)
             ),
         )

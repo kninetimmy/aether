@@ -44,6 +44,77 @@ _INSERT_OBSERVATION = (
     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 )
 
+#: Column list (in :class:`ObservationRow` field order) for history reads.
+_OBSERVATION_COLUMNS = (
+    "record_id, correlation_key, kind, track_type, source, "
+    "lon, lat, alt_m, observed_at, received_at, persisted_at, payload"
+)
+
+
+def read_track_history(
+    path: str,
+    identity: str,
+    *,
+    start_iso: str | None = None,
+    end_iso: str | None = None,
+    limit: int,
+    busy_timeout_ms: int = 5000,
+) -> list[ObservationRow]:
+    """Return one track's persisted observations, oldest-first (read-only, blocking).
+
+    Opens a *fresh read-only* connection (``mode=ro``) so the read path never
+    touches the writer's or retention's connection (PRD §5): a WAL reader neither
+    blocks nor is blocked by the single writer, and this opener can never migrate or
+    mutate the store. ``identity`` is matched the way the UI identifies a track — its
+    ``correlation_key`` when fused, else its ``record_id`` (the same
+    ``COALESCE(correlation_key, record_id)`` identity the downsampler groups on). The
+    optional ``[start_iso, end_iso)`` window is half-open; bounds must already be in
+    the store's canonical UTC-ISO form so the lexical compare is chronological. The
+    most recent ``limit`` observations are selected (so a capped response keeps the
+    newest history) and returned in ascending ``observed_at`` order.
+
+    Raises ``sqlite3.OperationalError`` when the store file does not exist
+    (persistence off, or nothing written yet); the caller maps that to an empty
+    history. Blocking — call via ``asyncio.to_thread``.
+    """
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, check_same_thread=False)
+    try:
+        conn.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
+        clauses = [
+            f"SELECT {_OBSERVATION_COLUMNS} FROM observations "
+            "WHERE (correlation_key = ? OR (correlation_key IS NULL AND record_id = ?))"
+        ]
+        params: list[object] = [identity, identity]
+        if start_iso is not None:
+            clauses.append("AND observed_at >= ?")
+            params.append(start_iso)
+        if end_iso is not None:
+            clauses.append("AND observed_at < ?")
+            params.append(end_iso)
+        clauses.append("ORDER BY observed_at DESC, id DESC LIMIT ?")
+        params.append(limit)
+        rows = conn.execute(" ".join(clauses), params).fetchall()
+    finally:
+        conn.close()
+    rows.reverse()  # newest-first select → return oldest-first
+    return [
+        ObservationRow(
+            record_id=row[0],
+            correlation_key=row[1],
+            kind=row[2],
+            track_type=row[3],
+            source=row[4],
+            lon=row[5],
+            lat=row[6],
+            alt_m=row[7],
+            observed_at=row[8],
+            received_at=row[9],
+            persisted_at=row[10],
+            payload=row[11],
+        )
+        for row in rows
+    ]
+
 
 class Database:
     """Owns the persistence connection. All methods are blocking — call from a thread."""

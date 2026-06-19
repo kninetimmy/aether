@@ -216,6 +216,15 @@ class LiveState:
             changes.append(self.remove("feature", fid))
         return changes
 
+    def get_track(self, track_id: str) -> TrackRecord | None:
+        """Return the current track stored under ``track_id``, or ``None``.
+
+        Backs ``GET /api/v2/tracks/{track_id}`` (PRD §21.3): a fused track's id *is*
+        its correlation key, so the same id the snapshot/websocket exposes is the
+        lookup key here — no separate index needed.
+        """
+        return self._tracks.get(track_id)
+
     def snapshot(self) -> Snapshot:
         """Return the full current state at the current sequence number."""
         return Snapshot(

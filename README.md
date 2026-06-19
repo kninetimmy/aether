@@ -53,7 +53,8 @@ Working today:
 - **Schema v2** — a Pydantic v2 discriminated record union (track / geo-feature / event / alert /
   source-status) with provenance, correlation keys, and observed/received/published timestamps.
 - **MQTT bus** — records flow over `aether/v2/...` topics (Mosquitto).
-- **FastAPI backend** — in-memory live state at `/api/state`, runtime config at `/api/config`, and a
+- **FastAPI backend** — in-memory live state at `/api/state`, runtime config at `/api/config`, current track
+  detail at `/api/v2/tracks/{id}`, persisted track history at `/api/v2/tracks/{id}/history`, and a
   sequence-numbered websocket `/ws/v2` (snapshot then deltas, with gap detection and resync). Clients can
   `subscribe` to narrow the stream to a viewport bbox, source set, and track types (server-side filtering).
 - **Fusion engine** — local and Internet observations of one identity collapse into a single track via
@@ -78,6 +79,9 @@ Working today:
 - **Retention manager** — enforces the 30-day window and the `AETHER_DB_MAX_GB` / `AETHER_MIN_FREE_DISK_GB`
   limits via a storage-pressure ladder (downsample → delete oldest → shorten retention → VACUUM), emitting a
   health warning + system event under pressure. Disk limits override time retention.
+- **History read API** — `GET /api/v2/tracks/{id}/history` returns a track's persisted observations
+  (oldest-first, optional `start`/`end` window, `limit`-capped with a `truncated` flag), served on a fresh
+  read-only connection so the read path never gates serving live state.
 
 See the milestone roadmap (M0–M7) in [`CLAUDE.md`](CLAUDE.md) §4 and the exit criteria in `PRD.md` §32–33.
 
@@ -298,6 +302,7 @@ Defaults shown in parentheses. Each source also accepts `*_POLL_S` / `*_THROTTLE
 | `AETHER_MIN_FREE_DISK_GB` | `0` (off) | Free-disk floor. Crossing it is critical pressure; aether sheds its own oldest data. |
 | `AETHER_RETENTION_INTERVAL_S` | `3600` | How often the retention sweep runs. |
 | `AETHER_DB_HIGH_WATER` / `_CRITICAL_WATER` | `0.85` / `0.95` | Fractions of `DB_MAX_GB` where the ladder engages / escalates. |
+| `AETHER_HISTORY_MAX_POINTS` | `10000` | Cap on points returned by one `/api/v2/tracks/{id}/history` request (response flags `truncated`). |
 
 ---
 
