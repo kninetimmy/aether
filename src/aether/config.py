@@ -136,6 +136,27 @@ DEFAULT_DB_PATH = "aether.db"
 #: a full queue drops records rather than back-pressuring the bus.
 DEFAULT_PERSIST_QUEUE_MAX = 10000
 
+#: Per-source persist-cadence sampling (PRD §19.5). On by default: a coarse
+#: persist-time gate admitting at most one observation per ``(source, identity)``
+#: per the cadence below, bounding DB growth *proactively* (the edge ThrottleGate
+#: only caps the bus at ~1/identity/s; the retention manager only reclaims space
+#: *reactively*). Off ⇒ full-fidelity capture (the M4.1 behavior). Emergency-tagged
+#: tracks always persist regardless of cadence.
+DEFAULT_PERSIST_SAMPLE = True
+#: Per-source minimum seconds between persisted observations of one identity
+#: (PRD §19.5). ``0`` disables the time gate for that source — "persist every
+#: unique packet" for APRS (already edge-throttled + de-duplicated), and the safe
+#: default for any untuned source (incl. the in-process demo), so aether never
+#: silently thins a feed it wasn't told how to sample.
+DEFAULT_PERSIST_SAMPLE_LOCAL_ADSB_S = 5.0
+DEFAULT_PERSIST_SAMPLE_NETWORK_ADSB_S = 15.0
+DEFAULT_PERSIST_SAMPLE_AIS_S = 30.0
+#: Covers both APRS sources (``local_aprs`` + ``aprs_is``): every unique packet.
+DEFAULT_PERSIST_SAMPLE_APRS_S = 0.0
+#: Fallback cadence for sources without a tuned knob above (demo, sonde, future
+#: feeds). ``0`` ⇒ persist all, keeping the no-hardware demo path full-fidelity.
+DEFAULT_PERSIST_SAMPLE_DEFAULT_S = 0.0
+
 #: Retention window (PRD §19.4 target = 30 days). Observations older than this are
 #: deleted on each retention sweep; storage pressure may shorten the *effective*
 #: window below this (ladder step 5). Set very high to effectively disable time
@@ -278,6 +299,17 @@ class Settings:
     db_path: str = DEFAULT_DB_PATH
     persist_queue_max: int = DEFAULT_PERSIST_QUEUE_MAX
 
+    #: Per-source persist-cadence sampling (M4.2b, PRD §19.5). ``persist_sample``
+    #: gates how often each ``(source, identity)`` is persisted to bound DB growth
+    #: proactively; ``0`` for a source disables its time gate (persist every
+    #: record). Active only when ``persist`` is on; never gates serving live state.
+    persist_sample: bool = DEFAULT_PERSIST_SAMPLE
+    persist_sample_local_adsb_s: float = DEFAULT_PERSIST_SAMPLE_LOCAL_ADSB_S
+    persist_sample_network_adsb_s: float = DEFAULT_PERSIST_SAMPLE_NETWORK_ADSB_S
+    persist_sample_ais_s: float = DEFAULT_PERSIST_SAMPLE_AIS_S
+    persist_sample_aprs_s: float = DEFAULT_PERSIST_SAMPLE_APRS_S
+    persist_sample_default_s: float = DEFAULT_PERSIST_SAMPLE_DEFAULT_S
+
     #: Retention manager (M4.2, PRD §19.4). Runs as a sibling of the persistence
     #: writer (only when ``persist`` is on) on its own DB connection, so a sweep —
     #: including a VACUUM — never gates serving live state (PRD §5). Enforces the
@@ -382,6 +414,26 @@ class Settings:
             db_path=os.environ.get("AETHER_DB_PATH", DEFAULT_DB_PATH),
             persist_queue_max=int(
                 os.environ.get("AETHER_PERSIST_QUEUE_MAX", DEFAULT_PERSIST_QUEUE_MAX)
+            ),
+            persist_sample=_env_bool("AETHER_PERSIST_SAMPLE", DEFAULT_PERSIST_SAMPLE),
+            persist_sample_local_adsb_s=float(
+                os.environ.get(
+                    "AETHER_PERSIST_SAMPLE_LOCAL_ADSB_S", DEFAULT_PERSIST_SAMPLE_LOCAL_ADSB_S
+                )
+            ),
+            persist_sample_network_adsb_s=float(
+                os.environ.get(
+                    "AETHER_PERSIST_SAMPLE_NETWORK_ADSB_S", DEFAULT_PERSIST_SAMPLE_NETWORK_ADSB_S
+                )
+            ),
+            persist_sample_ais_s=float(
+                os.environ.get("AETHER_PERSIST_SAMPLE_AIS_S", DEFAULT_PERSIST_SAMPLE_AIS_S)
+            ),
+            persist_sample_aprs_s=float(
+                os.environ.get("AETHER_PERSIST_SAMPLE_APRS_S", DEFAULT_PERSIST_SAMPLE_APRS_S)
+            ),
+            persist_sample_default_s=float(
+                os.environ.get("AETHER_PERSIST_SAMPLE_DEFAULT_S", DEFAULT_PERSIST_SAMPLE_DEFAULT_S)
             ),
             retention_days=int(os.environ.get("AETHER_RETENTION_DAYS", DEFAULT_RETENTION_DAYS)),
             db_max_gb=float(os.environ.get("AETHER_DB_MAX_GB", DEFAULT_DB_MAX_GB)),

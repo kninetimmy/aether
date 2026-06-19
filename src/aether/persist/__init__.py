@@ -8,13 +8,16 @@ surface is the lifespan runner :func:`aether.persist.runner.run_persistence`; th
 """
 
 from aether.persist.database import Database, ObservationRow
-from aether.persist.runner import run_persistence
+from aether.persist.runner import build_sample_gate, run_persistence
+from aether.persist.sampling import SampleGate
 from aether.persist.writer import PersistenceWriter, to_observation_row
 
 __all__ = [
     "Database",
     "ObservationRow",
     "PersistenceWriter",
+    "SampleGate",
+    "build_sample_gate",
     "run_persistence",
     "to_observation_row",
 ]

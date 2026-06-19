@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from aether.persist.database import Database, ObservationRow
+from aether.persist.sampling import SampleGate
 from aether.persist.writer import PersistenceWriter, to_observation_row
 from aether.schema.geometry import Point
 from aether.schema.provenance import Provenance
@@ -20,6 +21,7 @@ def _track(
     record_id: str = "local_adsb:abc",
     correlation_key: str | None = "aircraft:icao:abc",
     with_geometry: bool = True,
+    tags: list[str] | None = None,
 ) -> TrackRecord:
     return TrackRecord(
         id=record_id,
@@ -32,6 +34,7 @@ def _track(
         geometry=Point(coordinates=[-95.0, 40.0, 3000.0]) if with_geometry else None,
         altitude_m=3000.0,
         locally_received=True,
+        tags=tags if tags is not None else [],
         provenance=[Provenance(source="local_adsb", observed_at=T0, received_at=T0, local_rf=True)],
     )
 
@@ -126,6 +129,54 @@ def test_full_queue_drops_without_raising(tmp_path: Path) -> None:
         for i in range(5):
             writer.enqueue(_track(record_id=f"t{i}"))
         assert writer.dropped == 4
+    finally:
+        db.close()
+
+
+# -- sampling gate composition (PRD §19.5) -----------------------------------
+
+
+def test_sampling_gate_thins_sub_cadence_duplicates(tmp_path: Path) -> None:
+    db = Database(str(tmp_path / "p.db"))
+    db.open()
+    try:
+        # Three records for one identity at the same instant; cadence 5 s admits
+        # only the first, the rest are sampled out (not queue-full drops).
+        writer = PersistenceWriter(db, sample_gate=SampleGate({"local_adsb": 5.0}), now=lambda: T0)
+        asyncio.run(_drive(writer, [_track(record_id=f"t{i}") for i in range(3)]))
+        assert db.count_observations() == 1
+        assert writer.sampled == 2
+        assert writer.dropped == 0
+    finally:
+        db.close()
+
+
+def test_sampling_gate_lets_emergency_bypass(tmp_path: Path) -> None:
+    db = Database(str(tmp_path / "p.db"))
+    db.open()
+    try:
+        writer = PersistenceWriter(db, sample_gate=SampleGate({"local_adsb": 5.0}), now=lambda: T0)
+        # Ordinary point, then an emergency point 0 s later: the emergency persists
+        # despite the cadence (PRD §19.5 higher-fidelity-while-alert-active).
+        asyncio.run(
+            _drive(writer, [_track(record_id="a"), _track(record_id="b", tags=["emergency"])])
+        )
+        assert db.count_observations() == 2
+        assert writer.sampled == 0
+    finally:
+        db.close()
+
+
+def test_no_gate_persists_every_record(tmp_path: Path) -> None:
+    db = Database(str(tmp_path / "p.db"))
+    db.open()
+    try:
+        # sample_gate defaults to None → M4.1 full-fidelity behavior: both points
+        # of one identity at one instant persist.
+        writer = PersistenceWriter(db, now=lambda: T0)
+        asyncio.run(_drive(writer, [_track(record_id="a"), _track(record_id="b")]))
+        assert db.count_observations() == 2
+        assert writer.sampled == 0
     finally:
         db.close()
 
