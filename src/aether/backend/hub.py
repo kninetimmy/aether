@@ -25,13 +25,14 @@ clients during a broadcast is safe without locks.
 
 import asyncio
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from aether.backend.protocol import delta_message, snapshot_message
 from aether.backend.subscription import ClientFilter
-from aether.schema.records import Record
+from aether.schema.records import AlertRecord, Record
 from aether.state.live import LiveState, StateChange, StateKind
 
 log = logging.getLogger(__name__)
@@ -72,6 +73,7 @@ class Hub:
         self._state = state if state is not None else LiveState()
         self._maxsize = client_queue_maxsize
         self._clients: set[Connection] = set()
+        self._observers: list[Callable[[StateChange], None]] = []
 
     @property
     def state(self) -> LiveState:
@@ -89,6 +91,16 @@ class Hub:
 
     def unregister(self, conn: Connection) -> None:
         self._clients.discard(conn)
+
+    def add_observer(self, observer: Callable[[StateChange], None]) -> None:
+        """Register a post-broadcast hook called once per state change.
+
+        Each observer runs *after* a change has fanned out to clients, so an observer
+        that mutates state in turn (e.g. the alert engine publishing an alert) cannot
+        race the broadcast it is reacting to. Observers are error-isolated in
+        :meth:`_notify` — a raising observer never aborts the fan-out (PRD §37).
+        """
+        self._observers.append(observer)
 
     def snapshot_for(self, conn: Connection) -> dict[str, Any]:
         """Build a fresh filtered snapshot for ``conn`` and re-anchor it.
@@ -137,6 +149,7 @@ class Hub:
         change = self._state.apply(record, now)
         for conn in self._clients:
             self._dispatch(conn, change)
+        self._notify(change)
 
     def remove(self, kind: StateKind, id: str) -> None:
         """Remove a track/feature/alert by id and broadcast the removal.
@@ -149,6 +162,7 @@ class Hub:
         change = self._state.remove(kind, id)
         for conn in self._clients:
             self._dispatch(conn, change)
+        self._notify(change)
 
     def expire(self, now: datetime) -> None:
         """Age out stale tracks/features and broadcast each resulting delta.
@@ -160,6 +174,46 @@ class Hub:
         for change in self._state.expire(now):
             for conn in self._clients:
                 self._dispatch(conn, change)
+            self._notify(change)
+
+    def transition_alert(
+        self, alert_id: str, to_state: Literal["acknowledged", "resolved"], now: datetime
+    ) -> AlertRecord | None:
+        """Move a live alert to ``acknowledged``/``resolved`` and rebroadcast it.
+
+        Backs ``POST /api/v2/alerts/{id}/acknowledge|resolve`` (PRD §21.4, §20.5).
+        Returns the updated alert, or ``None`` if no live alert has that id (the API
+        maps that to 404). Stamps the matching lifecycle timestamp (``acknowledged_at``
+        is set only on the first ack so a re-ack is idempotent), then re-applies the
+        alert as an upsert so every client and observer sees the new state. In-memory
+        only — no store I/O — so it never blocks the loop.
+        """
+        existing = self._state.get_alert(alert_id)
+        if existing is None:
+            return None
+        updates: dict[str, Any] = {"state": to_state, "published_at": now}
+        if to_state == "acknowledged" and existing.acknowledged_at is None:
+            updates["acknowledged_at"] = now
+        if to_state == "resolved":
+            updates["resolved_at"] = now
+        updated = existing.model_copy(update=updates)
+        change = self._state.apply(updated, now)
+        for conn in self._clients:
+            self._dispatch(conn, change)
+        self._notify(change)
+        return updated
+
+    def _notify(self, change: StateChange) -> None:
+        """Run every observer for one change, isolating failures (PRD §37).
+
+        A raising observer is logged and skipped so neither the other observers nor
+        the broadcast that preceded it are affected.
+        """
+        for observer in self._observers:
+            try:
+                observer(change)
+            except Exception:  # one bad observer must not break the others / the loop
+                log.warning("hub observer raised; skipping", exc_info=True)
 
     def _dispatch(self, conn: Connection, change: StateChange) -> None:
         """Filter, cseq-stamp, and enqueue one change for one connection.
