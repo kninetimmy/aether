@@ -21,6 +21,7 @@ from typing import Any
 import aiomqtt
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
+from aether.adapters.ais import run_ais
 from aether.adapters.aprs_is import run_aprs_is
 from aether.adapters.local_adsb import run_local_adsb
 from aether.adapters.local_aprs import run_local_aprs
@@ -65,6 +66,8 @@ def create_app(*, settings: Settings | None = None, demo_interval_s: float = 1.0
             tasks.append(asyncio.create_task(run_network_adsb(cfg, ready)))
         if cfg.aprs_is:
             tasks.append(asyncio.create_task(run_aprs_is(cfg, ready)))
+        if cfg.ais:
+            tasks.append(asyncio.create_task(run_ais(cfg, ready)))
         try:
             yield
         finally:

@@ -98,6 +98,36 @@ DEFAULT_APRS_IS_TIMEOUT_S = 10.0
 #: this window: the stalled-connection guard (PRD §17.3).
 DEFAULT_APRS_IS_STALL_S = 60.0
 
+#: AIS vessel feed via AISStream.io secure WebSocket (PRD §18.5). RECEIVE-ONLY: the
+#: subscription is the only thing aether sends; there is no RF path. The host/path
+#: are AISStream's public stream endpoint (not secrets); ``wss`` (TLS) is the real
+#: transport — the no-hardware fake feeder flips ``AETHER_AIS_TLS=0`` for plain ws.
+DEFAULT_AIS_HOST = "stream.aisstream.io"
+DEFAULT_AIS_PORT = 443
+DEFAULT_AIS_PATH = "/v0/stream"
+DEFAULT_AIS_TLS = True
+#: Operator-supplied AISStream API key. **Deliberately empty** — the repo carries no
+#: credentials (PRD §2/§37); enable the adapter and set ``AETHER_AIS_API_KEY`` to
+#: your own. Enabled + empty fails *visibly* as an ``offline`` source status (the key
+#: travels only in the subscription body and is never logged), never anonymously.
+DEFAULT_AIS_API_KEY = ""
+#: AOI center for the AISStream bounding-box subscription. **Null-island placeholder**
+#: — the repo carries no station coordinates (PRD §2/§37); left at the default the box
+#: covers open ocean and finds nothing, failing visibly rather than leaking a location
+#: (same stance as network ADS-B / APRS-IS). Operator supplies via
+#: ``AETHER_AIS_LAT``/``_LON``.
+DEFAULT_AIS_CENTER_LAT = 0.0
+DEFAULT_AIS_CENTER_LON = 0.0
+#: Default AOI radius (NM) — the PRD §16.2 home-station default; converted to a
+#: lat/lon bounding box for the AISStream subscription at the adapter edge.
+DEFAULT_AIS_RADIUS_NM = 500.0
+#: At most one ordinary update per vessel per this window (PRD §18.1).
+DEFAULT_AIS_THROTTLE_S = 1.0
+#: Connect/handshake timeout for the AISStream WebSocket (PRD §17.4 "use timeouts").
+#: Liveness after connect is the WebSocket ping/pong the client maintains, so there
+#: is no data-silence stall: a quiet AOI legitimately sends nothing.
+DEFAULT_AIS_TIMEOUT_S = 10.0
+
 
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
@@ -165,6 +195,22 @@ class Settings:
     aprs_is_throttle_s: float = DEFAULT_APRS_IS_THROTTLE_S
     aprs_is_timeout_s: float = DEFAULT_APRS_IS_TIMEOUT_S
     aprs_is_stall_s: float = DEFAULT_APRS_IS_STALL_S
+
+    #: Run the AIS (AISStream.io) vessel adapter alongside the backend. Off by
+    #: default — opt in once an API key + AOI are set (M3.5, PRD §18.5). RECEIVE-ONLY:
+    #: a network-only Internet feed, no RF path. ``ais_tls`` is True for the real
+    #: ``wss`` endpoint; the no-hardware fake feeder runs plain ``ws``.
+    ais: bool = False
+    ais_host: str = DEFAULT_AIS_HOST
+    ais_port: int = DEFAULT_AIS_PORT
+    ais_path: str = DEFAULT_AIS_PATH
+    ais_tls: bool = DEFAULT_AIS_TLS
+    ais_api_key: str = DEFAULT_AIS_API_KEY
+    ais_center_lat: float = DEFAULT_AIS_CENTER_LAT
+    ais_center_lon: float = DEFAULT_AIS_CENTER_LON
+    ais_radius_nm: float = DEFAULT_AIS_RADIUS_NM
+    ais_throttle_s: float = DEFAULT_AIS_THROTTLE_S
+    ais_timeout_s: float = DEFAULT_AIS_TIMEOUT_S
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -240,4 +286,15 @@ class Settings:
             aprs_is_stall_s=float(
                 os.environ.get("AETHER_APRS_IS_STALL_S", DEFAULT_APRS_IS_STALL_S)
             ),
+            ais=_env_bool("AETHER_AIS", False),
+            ais_host=os.environ.get("AETHER_AIS_HOST", DEFAULT_AIS_HOST),
+            ais_port=int(os.environ.get("AETHER_AIS_PORT", DEFAULT_AIS_PORT)),
+            ais_path=os.environ.get("AETHER_AIS_PATH", DEFAULT_AIS_PATH),
+            ais_tls=_env_bool("AETHER_AIS_TLS", DEFAULT_AIS_TLS),
+            ais_api_key=os.environ.get("AETHER_AIS_API_KEY", DEFAULT_AIS_API_KEY),
+            ais_center_lat=float(os.environ.get("AETHER_AIS_LAT", DEFAULT_AIS_CENTER_LAT)),
+            ais_center_lon=float(os.environ.get("AETHER_AIS_LON", DEFAULT_AIS_CENTER_LON)),
+            ais_radius_nm=float(os.environ.get("AETHER_AIS_RADIUS_NM", DEFAULT_AIS_RADIUS_NM)),
+            ais_throttle_s=float(os.environ.get("AETHER_AIS_THROTTLE_S", DEFAULT_AIS_THROTTLE_S)),
+            ais_timeout_s=float(os.environ.get("AETHER_AIS_TIMEOUT_S", DEFAULT_AIS_TIMEOUT_S)),
         )
