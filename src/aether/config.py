@@ -8,7 +8,7 @@ no-hardware demo runs with no environment set.
 """
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 #: Default broker endpoint — loopback only (PRD §23: "MQTT is loopback-bound").
 DEFAULT_MQTT_HOST = "127.0.0.1"
@@ -185,10 +185,19 @@ DEFAULT_DB_CRITICAL_WATER = 0.95
 #: alert is delivered on a channel only when its severity meets the channel's
 #: threshold; below it the channel resolves to ``suppressed``. ``info`` (the default)
 #: delivers everything. ``dashboard`` has no threshold — the alert centre records
-#: every alert. Applies to the browser channel now; email/discord drivers in M4.7b.
+#: every alert. Honored for browser/email/discord by the dispatcher.
 DEFAULT_NOTIFY_BROWSER_MIN_SEVERITY = "info"
 DEFAULT_NOTIFY_EMAIL_MIN_SEVERITY = "info"
 DEFAULT_NOTIFY_DISCORD_MIN_SEVERITY = "info"
+
+#: Server-side notification-driver defaults (M4.7b, PRD §20.4). The email driver is
+#: wired only when host + both addresses are set; discord only when its webhook URL
+#: is set — an unwired channel resolves to ``unconfigured`` (visible, never a crash).
+#: 587 + STARTTLS is the de-facto SMTP submission default; ``ssl`` (465) and ``none``
+#: are the other supported TLS modes. The SMTP password and webhook URL are secrets:
+#: env/secrets only, kept out of ``repr``, and never logged or echoed by an API.
+DEFAULT_SMTP_PORT = 587
+DEFAULT_SMTP_TLS = "starttls"
 
 #: Hard cap on observations returned by one ``/api/v2/tracks/{id}/history`` request
 #: (M4.3, PRD §21.3/§11.15). The request's ``limit`` query param defaults to and is
@@ -354,6 +363,20 @@ class Settings:
     notify_email_min_severity: str = DEFAULT_NOTIFY_EMAIL_MIN_SEVERITY
     notify_discord_min_severity: str = DEFAULT_NOTIFY_DISCORD_MIN_SEVERITY
 
+    #: Server-side notification drivers (M4.7b, PRD §20.4). Email is wired only when
+    #: ``smtp_host`` + ``email_from`` + ``email_to`` are all set; discord only when
+    #: ``discord_webhook_url`` is set (see :func:`aether.alerts.notify.
+    #: drivers_from_settings`). ``smtp_password`` and ``discord_webhook_url`` are
+    #: secrets — ``repr=False`` keeps them out of any accidental ``repr(cfg)``/log.
+    smtp_host: str = ""
+    smtp_port: int = DEFAULT_SMTP_PORT
+    smtp_tls: str = DEFAULT_SMTP_TLS
+    smtp_username: str = ""
+    smtp_password: str = field(default="", repr=False)
+    email_from: str = ""
+    email_to: str = ""
+    discord_webhook_url: str = field(default="", repr=False)
+
     @classmethod
     def from_env(cls) -> "Settings":
         # Resolve the canonical station first; the per-adapter AOI centers default
@@ -491,4 +514,12 @@ class Settings:
             notify_discord_min_severity=os.environ.get(
                 "AETHER_NOTIFY_DISCORD_MIN_SEVERITY", DEFAULT_NOTIFY_DISCORD_MIN_SEVERITY
             ),
+            smtp_host=os.environ.get("AETHER_SMTP_HOST", ""),
+            smtp_port=int(os.environ.get("AETHER_SMTP_PORT", DEFAULT_SMTP_PORT)),
+            smtp_tls=os.environ.get("AETHER_SMTP_TLS", DEFAULT_SMTP_TLS),
+            smtp_username=os.environ.get("AETHER_SMTP_USERNAME", ""),
+            smtp_password=os.environ.get("AETHER_SMTP_PASSWORD", ""),
+            email_from=os.environ.get("AETHER_EMAIL_FROM", ""),
+            email_to=os.environ.get("AETHER_EMAIL_TO", ""),
+            discord_webhook_url=os.environ.get("AETHER_DISCORD_WEBHOOK_URL", ""),
         )
