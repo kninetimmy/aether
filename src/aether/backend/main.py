@@ -40,6 +40,7 @@ from aether.backend.geofence_api import build_geofence_router
 from aether.backend.hub import Connection, Hub
 from aether.backend.notifications_api import build_notifications_router
 from aether.backend.protocol import snapshot_message
+from aether.backend.replay_api import build_replay_router
 from aether.backend.subscription import default_filter, parse_subscribe
 from aether.bus.client import DEFAULT_RECONNECT_S, connect, run_record_subscriber
 from aether.bus.demo_publisher import run_demo_publisher
@@ -190,6 +191,10 @@ def create_app(*, settings: Settings | None = None, demo_interval_s: float = 1.0
     app.include_router(build_alert_rules_router(cfg, hub, engine))
     app.include_router(build_alerts_router(hub))
     app.include_router(build_notifications_router(dispatcher, clock=lambda: datetime.now(UTC)))
+    # Read-only replay over persisted history (M4.8, PRD §19.6). Bound to cfg ONLY —
+    # no hub/engine/dispatcher — so it is structurally incapable of firing a live
+    # alert or notification (the M4 exit invariant, PRD §19.6/§32).
+    app.include_router(build_replay_router(cfg))
 
     @app.get("/api/health")
     async def health() -> dict[str, Any]:

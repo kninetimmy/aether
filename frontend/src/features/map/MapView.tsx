@@ -19,10 +19,15 @@ import {
 } from "../../map/style/basemap";
 import { toiHighlight } from "../../map/presentationRegistry";
 import { visibleTracks } from "../../state/selectors";
+import { replayVisibleRecords } from "../../state/replay";
 import { isLayerVisible, useStore } from "../../state/store";
+import type { GeoFeatureRecord, TrackRecord } from "../../types/records";
 
 const TRACK_SOURCE = "aether-tracks";
 const FEATURE_SOURCE = "aether-features";
+
+/** Stable empty feature map for replay (track-only persistence hides live overlays). */
+const EMPTY_FEATURES = new Map<string, GeoFeatureRecord>();
 
 // Default view: continental US-ish. No station coordinates baked in (PRD §5).
 const INITIAL_CENTER: [number, number] = [-98.5, 39.8];
@@ -46,6 +51,13 @@ export function MapView() {
   const watchlist = useStore((s) => s.watchlist);
   const selectTrack = useStore((s) => s.selectTrack);
   const client = useStore((s) => s.client);
+
+  // Replay slice (M4.8): when mode==='replay' the map renders the REPLAYED snapshot
+  // at the cursor instead of the live set. Live data keeps flowing into the store
+  // underneath — we just stop SHOWING it — so return-to-live is instant and replay
+  // never disturbs ingestion (PRD §19.6 invariant).
+  const replay = useStore((s) => s.replay);
+  const inReplay = replay.mode === "replay";
 
   // The server-side display-stream subscription (M3.6b): the viewport bbox plus
   // the source/track-type display filters become a debounced `subscribe` frame so
@@ -90,19 +102,35 @@ export function MapView() {
   // from the list (PRD §16.5). Display only; never changes ingestion. The TOI
   // highlight ring reads the SAME already-filtered features (filtering on isToi),
   // so a TOI hidden by any filter cannot reappear as a highlight.
-  const trackFc = useMemo(
-    () =>
-      trackFeatureCollection(
-        visibleTracks(tracks, filters, {
-          now: clock,
-          stationCenter,
-          watchlist,
-        }),
-        watchlist,
-      ),
-    [tracks, filters, stationCenter, clock, watchlist],
+  // In REPLAY mode, derive the on-map record set from the session buffer at the cursor
+  // (visible-at-T) and feed it through the SAME presentation path the live set uses — so
+  // a replayed aircraft/vessel looks exactly like its live counterpart, only frozen at
+  // time T. The display filters still apply to tracks (so a provenance/range/type filter
+  // narrows replay just as it does live). M4 persists ONLY track observations, so a
+  // replay buffer is track-only: overlay features (geofences/TFRs) are not historical
+  // and are hidden in replay rather than mixing live overlays into a past snapshot.
+  const replayTracks = useMemo(() => {
+    const m = new Map<string, TrackRecord>();
+    if (!inReplay) return m;
+    for (const r of replayVisibleRecords(replay.session, replay.cursorMs)) {
+      if (r.kind === "track") m.set(r.id, r);
+    }
+    return m;
+  }, [inReplay, replay.session, replay.cursorMs]);
+
+  const trackFc = useMemo(() => {
+    const src = inReplay ? replayTracks : tracks;
+    return trackFeatureCollection(
+      visibleTracks(src, filters, { now: clock, stationCenter, watchlist }),
+      watchlist,
+    );
+  }, [inReplay, replayTracks, tracks, filters, stationCenter, clock, watchlist]);
+  const featureFc = useMemo(
+    // Replay has no historical features to show (track-only persistence, M4), so the
+    // overlay source is emptied rather than showing LIVE features over a past snapshot.
+    () => featureFeatureCollection(inReplay ? EMPTY_FEATURES : features),
+    [inReplay, features],
   );
-  const featureFc = useMemo(() => featureFeatureCollection(features), [features]);
 
   // Initialize the map once.
   useEffect(() => {
