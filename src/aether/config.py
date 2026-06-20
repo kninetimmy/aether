@@ -207,6 +207,21 @@ DEFAULT_SMTP_TLS = "starttls"
 #: read-only connection per request and never gates serving live state (PRD §5).
 DEFAULT_HISTORY_MAX_POINTS = 10000
 
+#: Bounds on one replay window (M4.8, PRD §19.6/§21.6). ``replay_max_records`` caps the
+#: reconstructed buffer ``POST /api/v2/replay/sessions`` returns (the request's
+#: ``max_records`` defaults to and is clamped to this; ``truncated`` flags a hit so a
+#: capped buffer is never mistaken for the whole window). ``replay_max_window_h`` caps
+#: the ``[start, end)`` span a single request may ask for. Both bound response size +
+#: read/reconstruct cost on the Pi (PRD §37); the read AND the record reconstruction
+#: are served in a worker thread on a fresh read-only connection per request, so a
+#: large window never gates serving live state (PRD §5). The record cap is set for the
+#: Pi profile: a full buffer reconstructs + JSON-encodes to a payload the browser holds
+#: in memory, so 5000 (~5–6 MiB) keeps both the loop hand-off and the browser bounded;
+#: raise ``AETHER_REPLAY_MAX_RECORDS`` on a roomier host. Active only when persist is on
+#: (replay is unavailable — 503 — otherwise).
+DEFAULT_REPLAY_MAX_RECORDS = 5000
+DEFAULT_REPLAY_MAX_WINDOW_H = 168
+
 
 #: Canonical station location (PRD §5/§16.2). The ONE home position the whole app
 #: shares: the default per-connection websocket bbox (PRD §16.3a), the frontend
@@ -353,6 +368,14 @@ class Settings:
     #: request, so a slow/locked store can never gate serving live state (PRD §5).
     #: ``history_max_points`` caps one response (the ``truncated`` flag signals a hit).
     history_max_points: int = DEFAULT_HISTORY_MAX_POINTS
+
+    #: Replay API bounds (M4.8, PRD §19.6/§21.6). ``replay_max_records`` clamps the
+    #: reconstructed buffer one ``POST /api/v2/replay/sessions`` returns and
+    #: ``replay_max_window_h`` clamps its ``[start, end)`` span — both read from a fresh
+    #: read-only connection per request, so replay never gates serving live state
+    #: (PRD §5). Active only when ``persist`` is on (replay 503s otherwise).
+    replay_max_records: int = DEFAULT_REPLAY_MAX_RECORDS
+    replay_max_window_h: float = DEFAULT_REPLAY_MAX_WINDOW_H
 
     #: Per-channel notification severity thresholds (M4.7, PRD §20.5). The
     #: :class:`~aether.alerts.notify.NotificationDispatcher` delivers an alert on a
@@ -504,6 +527,12 @@ class Settings:
             ),
             history_max_points=int(
                 os.environ.get("AETHER_HISTORY_MAX_POINTS", DEFAULT_HISTORY_MAX_POINTS)
+            ),
+            replay_max_records=int(
+                os.environ.get("AETHER_REPLAY_MAX_RECORDS", DEFAULT_REPLAY_MAX_RECORDS)
+            ),
+            replay_max_window_h=float(
+                os.environ.get("AETHER_REPLAY_MAX_WINDOW_H", DEFAULT_REPLAY_MAX_WINDOW_H)
             ),
             notify_browser_min_severity=os.environ.get(
                 "AETHER_NOTIFY_BROWSER_MIN_SEVERITY", DEFAULT_NOTIFY_BROWSER_MIN_SEVERITY

@@ -330,3 +330,40 @@ export interface SubscribeFrame {
   include_events: boolean;
   include_alerts: boolean;
 }
+
+// --- Replay (record/replay over persisted history; M4.8, PRD §19.6/§21.6) ---
+// REST, NOT websocket: a replay session is a BOUNDED, SERVER-RECONSTRUCTED buffer
+// returned once over `POST /api/v2/replay/sessions`, then PLAYED CLIENT-SIDE (the
+// browser holds the records and runs the timeline). These shapes mirror
+// src/aether/backend/replay_api.py — keep them in sync. The hard M4 invariant
+// (PRD §19.6/§32) is that replay CANNOT fire live alerts: the server path is REST +
+// a read-only window read + pure record reconstruction; this client never publishes.
+
+/** Request body for `POST /api/v2/replay/sessions` (PRD §21.6 bounded export). */
+export interface ReplaySessionRequest {
+  /** ISO-8601 window start (inclusive). */
+  start: string;
+  /** ISO-8601 window end (exclusive); must be after `start`. */
+  end: string;
+  /** Optional contributing-source filter; null/omitted = all sources. */
+  sources?: string[] | null;
+  /** Optional per-window record cap; server clamps to `replay_max_records`. */
+  max_records?: number | null;
+}
+
+/**
+ * Response for a created replay session. `records` is the reconstructed buffer in
+ * ASCENDING `observed_at` order — the same wire shape the live snapshot emits, so
+ * the existing record-union types apply directly. `truncated` is true when the
+ * `max_records` cap was hit (only the EARLIEST `max_records` are returned; the
+ * window may hold more), so the UI can warn honestly.
+ */
+export interface ReplaySessionResponse {
+  session_id: string;
+  start: string;
+  end: string;
+  sources: string[] | null;
+  count: number;
+  truncated: boolean;
+  records: AnyRecord[];
+}

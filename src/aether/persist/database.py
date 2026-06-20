@@ -116,6 +116,73 @@ def read_track_history(
     ]
 
 
+def read_observations_window(
+    path: str,
+    *,
+    start_iso: str,
+    end_iso: str,
+    sources: Sequence[str] | None = None,
+    limit: int,
+    busy_timeout_ms: int = 5000,
+) -> list[ObservationRow]:
+    """Return all observations in ``[start_iso, end_iso)``, oldest-first (read-only, blocking).
+
+    The window read that backs replay (PRD §19.6): a *fresh read-only* connection
+    (``mode=ro``), exactly like :func:`read_track_history`, so it never touches the
+    writer's or retention's connection — a WAL reader neither blocks nor is blocked by
+    the single writer, and this opener can never migrate or mutate the store (PRD §5).
+    Unlike the per-track history read this is *not* scoped to one identity: it returns
+    every persisted observation in the window so replay can reconstruct the whole
+    picture for that span. The window is half-open; bounds must already be in the
+    store's canonical UTC-ISO form so the lexical compare is chronological. An optional
+    non-empty ``sources`` list restricts to those contributing sources (PRD §21.6
+    bounded-by-source export). Only ``kind='track'`` rows are returned: replay
+    reconstructs track history (M4), and the writer persists only ``TrackRecord`` rows
+    today — this guard keeps the buffer track-only by construction even if a future
+    migration starts persisting other kinds into the same table. Rows come back
+    ascending by ``observed_at`` then ``id`` (a stable order for the timeline), capped
+    at ``limit`` (caller clamps it).
+
+    Raises ``sqlite3.OperationalError`` when the store file does not exist
+    (persistence off, or nothing written yet); the caller maps that to an empty
+    window. Blocking — call via ``asyncio.to_thread``.
+    """
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, check_same_thread=False)
+    try:
+        conn.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
+        clauses = [
+            f"SELECT {_OBSERVATION_COLUMNS} FROM observations "
+            "WHERE kind = 'track' AND observed_at >= ? AND observed_at < ?"
+        ]
+        params: list[object] = [start_iso, end_iso]
+        if sources:
+            placeholders = ", ".join("?" for _ in sources)
+            clauses.append(f"AND source IN ({placeholders})")
+            params.extend(sources)
+        clauses.append("ORDER BY observed_at ASC, id ASC LIMIT ?")
+        params.append(limit)
+        rows = conn.execute(" ".join(clauses), params).fetchall()
+    finally:
+        conn.close()
+    return [
+        ObservationRow(
+            record_id=row[0],
+            correlation_key=row[1],
+            kind=row[2],
+            track_type=row[3],
+            source=row[4],
+            lon=row[5],
+            lat=row[6],
+            alt_m=row[7],
+            observed_at=row[8],
+            received_at=row[9],
+            persisted_at=row[10],
+            payload=row[11],
+        )
+        for row in rows
+    ]
+
+
 class Database:
     """Owns the persistence connection. All methods are blocking — call from a thread."""
 

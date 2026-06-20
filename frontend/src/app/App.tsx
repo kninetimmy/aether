@@ -10,6 +10,8 @@ import { LayerControl } from "../features/sources/LayerControl";
 import { SourceHealthPanel } from "../features/sources/SourceHealthPanel";
 import { TOIDetailsPanel } from "../features/toi/TOIDetailsPanel";
 import { TrackList } from "../features/tracks/TrackList";
+import { ReplayLauncher } from "../features/replay/ReplayLauncher";
+import { ReplayTimeline } from "../features/replay/ReplayTimeline";
 import { useStore } from "../state/store";
 
 export function App() {
@@ -20,10 +22,16 @@ export function App() {
   const ageMaxS = useStore((s) => s.filters.ageMaxS);
   const stale = useStore((s) => s.live.stale);
   const seq = useStore((s) => s.live.seq);
+  const replayMode = useStore((s) => s.replay.mode);
+  const replayPlaying = useStore((s) => s.replay.playing);
+  const replaySpeed = useStore((s) => s.replay.speed);
+  const tick = useStore((s) => s.tick);
 
   const [leftOpen, setLeftOpen] = useState(true);
   const [rightOpen, setRightOpen] = useState(true);
   const [bottomOpen, setBottomOpen] = useState(true);
+
+  const inReplay = replayMode === "replay";
 
   useEffect(() => {
     connect();
@@ -63,12 +71,37 @@ export function App() {
     return () => clearInterval(id);
   }, [tickClock, ageMaxS]);
 
+  // Drive replay playback: while playing, advance the cursor every TICK_MS by
+  // TICK_MS×speed of REPLAY time, so 1× tracks wall-clock and 10× is ten times
+  // faster. The store's tick() auto-pauses at the window end. Mirrors the tickClock
+  // effect; the interval is torn down whenever playback stops or mode leaves replay.
+  // Replay time only — nothing here touches live ingestion (PRD §19.6 invariant).
+  useEffect(() => {
+    if (!inReplay || !replayPlaying) return;
+    const TICK_MS = 250;
+    const id = setInterval(() => tick(TICK_MS * replaySpeed), TICK_MS);
+    return () => clearInterval(id);
+  }, [inReplay, replayPlaying, replaySpeed, tick]);
+
   return (
-    <div className="app">
+    <div className={`app${inReplay ? " replaying" : ""}`}>
       <header className="topbar">
         <span className="brand">aether</span>
-        <span className="mode">LIVE</span>
-        {stale && <span className="stale-banner">STALE — resyncing…</span>}
+        {/* Mode pill: LIVE vs a VISUALLY DISTINCT amber REPLAY pill so the two are
+            never confusable (HISTORY-FR-006). The amber .replaying app class also
+            tints the map border, doubling the cue beyond color alone (§24.9). */}
+        <span className={`mode${inReplay ? " replay" : ""}`}>
+          {inReplay ? "REPLAY" : "LIVE"}
+        </span>
+        <ReplayLauncher />
+        {inReplay && (
+          <span className="replay-banner" role="status">
+            REPLAY — historical data, not live
+          </span>
+        )}
+        {!inReplay && stale && (
+          <span className="stale-banner">STALE — resyncing…</span>
+        )}
         <span className="seq" title="last applied sequence">
           seq {seq}
         </span>
@@ -109,7 +142,8 @@ export function App() {
         <button className="collapse" onClick={() => setBottomOpen((v) => !v)}>
           {bottomOpen ? "▾" : "▴"}
         </button>
-        {bottomOpen && <EventFeed />}
+        {bottomOpen && inReplay && <ReplayTimeline />}
+        {bottomOpen && !inReplay && <EventFeed />}
       </footer>
     </div>
   );

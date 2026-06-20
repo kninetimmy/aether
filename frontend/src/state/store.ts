@@ -5,8 +5,15 @@
 
 import { create } from "zustand";
 import { WsClient, type ConnectionStatus } from "../api/wsClient";
+import { createReplaySession, deleteReplaySession } from "../api/replayClient";
 import { emptyState, type LiveState } from "./liveState";
-import type { TrackType } from "../types/records";
+import {
+  clampCursor,
+  emptyReplay,
+  sessionBoundsMs,
+  type ReplaySlice,
+} from "./replay";
+import type { ReplaySessionRequest, TrackType } from "../types/records";
 
 /**
  * Client-side provenance display filter (PRD §16.5 + the flagship "collapse to
@@ -144,6 +151,13 @@ export interface AppState {
    * re-evaluate and the filtered set doesn't silently drift between frames.
    */
   clock: number;
+  /**
+   * Record/replay slice (M4.8, PRD §19.6). `mode` gates whether the app shows the
+   * LIVE firehose or a REPLAYED snapshot; the buffer lives entirely client-side and
+   * is played against `cursorMs`. Live state above is NEVER touched by replay — the
+   * structural half of "replay can't fire live alerts" (PRD §19.6/§32).
+   */
+  replay: ReplaySlice;
   client: WsClient | null;
   connect: (url?: string) => void;
   disconnect: () => void;
@@ -161,6 +175,35 @@ export interface AppState {
   setToiMeta: (key: string, patch: ToiMeta) => void;
   /** Select a track for the details panel (null clears the selection). */
   selectTrack: (id: string | null) => void;
+
+  // --- Replay actions (M4.8, PRD §19.6/§21.6) ------------------------------
+  /**
+   * Enter replay: fetch a bounded session over REST, load the buffer, switch to
+   * REPLAY mode, park the cursor at the window start, PAUSED. Rejects (the caller
+   * shows the error) on a 503/400/transport failure — mode stays LIVE on failure.
+   * Live state is untouched throughout.
+   */
+  enterReplay: (req: ReplaySessionRequest) => Promise<void>;
+  /**
+   * Return to LIVE: drop the session/buffer and switch back. The live firehose was
+   * never interrupted, so this is an instant restore. Best-effort server teardown.
+   */
+  exitReplay: () => void;
+  /** Start playback (no-op outside replay or with no session). */
+  play: () => void;
+  /** Pause playback. */
+  pause: () => void;
+  /** Set the playback rate (× real time). */
+  setSpeed: (speed: number) => void;
+  /** Advance/rewind the cursor by deltaMs, clamped to the session window. */
+  step: (deltaMs: number) => void;
+  /** Jump the cursor to an absolute epoch-ms time, clamped to the window. */
+  seek: (tMs: number) => void;
+  /**
+   * Playback tick: advance the cursor by `advanceMs` while playing; auto-pause at
+   * the window end. Driven by an App setInterval effect (mirrors tickClock).
+   */
+  tick: (advanceMs: number) => void;
 }
 
 export const useStore = create<AppState>((set, get) => ({
@@ -173,6 +216,7 @@ export const useStore = create<AppState>((set, get) => ({
   selectedTrackId: null,
   stationCenter: null,
   clock: Date.now(),
+  replay: emptyReplay(),
   client: null,
 
   connect: (url?: string) => {
@@ -238,6 +282,72 @@ export const useStore = create<AppState>((set, get) => ({
     }),
 
   selectTrack: (selectedTrackId) => set({ selectedTrackId }),
+
+  // --- Replay actions (M4.8) -------------------------------------------------
+  // Entering replay does NOT close the websocket: live ingestion keeps running
+  // underneath so a one-click return-to-live is instant and never loses data. The
+  // replay buffer is read-only and played client-side; no action here publishes,
+  // mutates live state, or touches the engine — replay can't fire live alerts.
+
+  enterReplay: async (req) => {
+    const session = await createReplaySession(req); // throws → caller surfaces it
+    const { startMs } = sessionBoundsMs(session);
+    set((s) => ({
+      replay: {
+        ...s.replay,
+        mode: "replay",
+        session,
+        cursorMs: startMs,
+        playing: false,
+      },
+    }));
+  },
+
+  exitReplay: () => {
+    const prior = get().replay.session;
+    // Best-effort server teardown so the bounded registry reclaims the slot; a
+    // failure is irrelevant to the client, which has already dropped its buffer.
+    if (prior) void deleteReplaySession(prior.session_id).catch(() => {});
+    set({ replay: emptyReplay() });
+  },
+
+  play: () =>
+    set((s) =>
+      s.replay.mode === "replay" && s.replay.session
+        ? { replay: { ...s.replay, playing: true } }
+        : {},
+    ),
+
+  pause: () => set((s) => ({ replay: { ...s.replay, playing: false } })),
+
+  setSpeed: (speed) => set((s) => ({ replay: { ...s.replay, speed } })),
+
+  step: (deltaMs) =>
+    set((s) => {
+      if (!s.replay.session) return {};
+      const { startMs, endMs } = sessionBoundsMs(s.replay.session);
+      const cursorMs = clampCursor(s.replay.cursorMs + deltaMs, startMs, endMs);
+      return { replay: { ...s.replay, cursorMs } };
+    }),
+
+  seek: (tMs) =>
+    set((s) => {
+      if (!s.replay.session) return {};
+      const { startMs, endMs } = sessionBoundsMs(s.replay.session);
+      return { replay: { ...s.replay, cursorMs: clampCursor(tMs, startMs, endMs) } };
+    }),
+
+  tick: (advanceMs) =>
+    set((s) => {
+      if (!s.replay.playing || !s.replay.session) return {};
+      const { startMs, endMs } = sessionBoundsMs(s.replay.session);
+      const next = s.replay.cursorMs + advanceMs;
+      if (next >= endMs) {
+        // Hit the end of the window: park at the end and auto-pause.
+        return { replay: { ...s.replay, cursorMs: endMs, playing: false } };
+      }
+      return { replay: { ...s.replay, cursorMs: clampCursor(next, startMs, endMs) } };
+    }),
 }));
 
 /** A layer is visible unless explicitly toggled off (default-on). */
