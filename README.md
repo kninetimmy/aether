@@ -45,9 +45,9 @@ The repo carries no secrets, callsign, or station coordinates — each operator 
 ## Status
 
 Milestones **M1 (COP core) → M3 (network fusion)** are complete, and **M4 (alerts & history)** is in
-progress: SQLite persistence with track history and a retention manager have landed; the alert engine and
-replay are next. Live state is served from memory — persistence is a sibling consumer that never gates it.
-Working today:
+progress: SQLite persistence with track history and a retention manager, operator geofences, and the
+alert-rule engine with multi-channel notifications have landed; replay is next. Live state is served from
+memory — persistence is a sibling consumer that never gates it. Working today:
 
 **Core**
 - **Schema v2** — a Pydantic v2 discriminated record union (track / geo-feature / event / alert /
@@ -82,6 +82,20 @@ Working today:
 - **History read API** — `GET /api/v2/tracks/{id}/history` returns a track's persisted observations
   (oldest-first, optional `start`/`end` window, `limit`-capped with a `truncated` flag), served on a fresh
   read-only connection so the read path never gates serving live state.
+
+**Alerts & notifications** (M4; rules persist when `AETHER_PERSIST=1`)
+- **Alert-rule engine** — operator rules (CRUD at `/api/v2/alert-rules`, dry-run preview at `…/{id}/test`)
+  evaluate fused-state transitions, events, and source-status changes; matches open an alert with a full
+  lifecycle (open → acknowledged/resolved/suppressed) plus cooldown, dedup, quiet-hours, and geofence
+  enter/exit/contains operators. Acknowledge/resolve at `/api/v2/alerts/{id}/…`.
+- **Geofences** — operator circles/polygons (CRUD at `/api/v2/geofences`) persisted and projected onto the
+  map as overlay features; the authoritative shape feeds the alert engine's containment math.
+- **Notification delivery** — each fired alert settles a per-channel `delivery_status` off the hot path:
+  the dashboard alert-centre, browser Notifications (per severity threshold), **SMTP email**, and **Discord
+  webhook**. Drivers are independent, retry transient failures, and never log the SMTP password or webhook
+  token; an unconfigured channel degrades visibly to `unconfigured`. `POST /api/v2/notifications/test` fires
+  a synthetic alert through the selected channels (isolated from live state) so an operator can confirm
+  config. Delivery is a best-effort sibling — it never gates serving live state.
 
 See the milestone roadmap (M0–M7) in [`CLAUDE.md`](CLAUDE.md) §4 and the exit criteria in `PRD.md` §32–33.
 
@@ -303,6 +317,15 @@ Defaults shown in parentheses. Each source also accepts `*_POLL_S` / `*_THROTTLE
 | `AETHER_RETENTION_INTERVAL_S` | `3600` | How often the retention sweep runs. |
 | `AETHER_DB_HIGH_WATER` / `_CRITICAL_WATER` | `0.85` / `0.95` | Fractions of `DB_MAX_GB` where the ladder engages / escalates. |
 | `AETHER_HISTORY_MAX_POINTS` | `10000` | Cap on points returned by one `/api/v2/tracks/{id}/history` request (response flags `truncated`). |
+| `AETHER_NOTIFY_BROWSER_MIN_SEVERITY` | `info` | Min severity to deliver on the browser channel (else `suppressed`). |
+| `AETHER_NOTIFY_EMAIL_MIN_SEVERITY` | `info` | Min severity to deliver email. |
+| `AETHER_NOTIFY_DISCORD_MIN_SEVERITY` | `info` | Min severity to deliver Discord. |
+| `AETHER_SMTP_HOST` | _(empty)_ | SMTP server. Set (with `EMAIL_FROM`/`EMAIL_TO`) to wire the email channel; empty ⇒ `unconfigured`. |
+| `AETHER_SMTP_PORT` | `587` | SMTP port. |
+| `AETHER_SMTP_TLS` | `starttls` | `starttls`, `ssl` (465), or `none`. |
+| `AETHER_SMTP_USERNAME` / `AETHER_SMTP_PASSWORD` | _(empty)_ | SMTP login. The password is a secret — never logged or echoed by an API. |
+| `AETHER_EMAIL_FROM` / `AETHER_EMAIL_TO` | _(empty)_ | Sender / recipient addresses. |
+| `AETHER_DISCORD_WEBHOOK_URL` | _(empty)_ | Discord webhook. Set to wire the Discord channel; empty ⇒ `unconfigured`. A secret — redacted to scheme+host in logs/API. |
 
 ---
 

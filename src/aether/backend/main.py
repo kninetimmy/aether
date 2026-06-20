@@ -28,12 +28,17 @@ from aether.adapters.local_adsb import run_local_adsb
 from aether.adapters.local_aprs import run_local_aprs
 from aether.adapters.network_adsb import run_network_adsb
 from aether.alerts.engine import AlertEngine
-from aether.alerts.notify import ChannelThresholds, NotificationDispatcher
+from aether.alerts.notify import (
+    ChannelThresholds,
+    NotificationDispatcher,
+    drivers_from_settings,
+)
 from aether.alerts.templates import default_rule_templates
 from aether.backend.alert_rules_api import build_alert_rules_router
 from aether.backend.alerts_api import build_alerts_router
 from aether.backend.geofence_api import build_geofence_router
 from aether.backend.hub import Connection, Hub
+from aether.backend.notifications_api import build_notifications_router
 from aether.backend.protocol import snapshot_message
 from aether.backend.subscription import default_filter, parse_subscribe
 from aether.bus.client import DEFAULT_RECONNECT_S, connect, run_record_subscriber
@@ -86,11 +91,12 @@ def create_app(*, settings: Settings | None = None, demo_interval_s: float = 1.0
 
     # The notification dispatcher settles each fired alert's per-channel
     # ``delivery_status`` off the hot path (PRD §20.4): the synchronous observer only
-    # enqueues, while the sibling ``run`` task (started in the lifespan) resolves
-    # browser/dashboard by severity threshold and writes the result back through the
-    # hub. Always wired — with no rules there are no alerts and it is inert; the
-    # server-side email/discord drivers plug into ``drivers=`` in M4.7b. Registered
-    # AFTER ``_emit_alerts`` so it observes the alert that observer publishes.
+    # enqueues, while the sibling ``run`` task (started in the lifespan) resolves each
+    # channel by severity threshold + driver and writes the result back through the
+    # hub. Always wired — with no rules there are no alerts and it is inert. The
+    # server-side email/discord drivers are wired from config when their creds are
+    # present; an unconfigured channel resolves to ``unconfigured`` (visible, never a
+    # crash). Registered AFTER ``_emit_alerts`` so it observes the published alert.
     dispatcher = NotificationDispatcher(
         publish=hub.publish,
         clock=lambda: datetime.now(UTC),
@@ -98,6 +104,16 @@ def create_app(*, settings: Settings | None = None, demo_interval_s: float = 1.0
             browser=cfg.notify_browser_min_severity,
             email=cfg.notify_email_min_severity,
             discord=cfg.notify_discord_min_severity,
+        ),
+        drivers=drivers_from_settings(
+            smtp_host=cfg.smtp_host,
+            smtp_port=cfg.smtp_port,
+            smtp_tls=cfg.smtp_tls,
+            smtp_username=cfg.smtp_username,
+            smtp_password=cfg.smtp_password,
+            email_from=cfg.email_from,
+            email_to=cfg.email_to,
+            discord_webhook_url=cfg.discord_webhook_url,
         ),
     )
     hub.add_observer(dispatcher.observe)
@@ -173,6 +189,7 @@ def create_app(*, settings: Settings | None = None, demo_interval_s: float = 1.0
     app.include_router(build_geofence_router(cfg, hub, engine))
     app.include_router(build_alert_rules_router(cfg, hub, engine))
     app.include_router(build_alerts_router(hub))
+    app.include_router(build_notifications_router(dispatcher, clock=lambda: datetime.now(UTC)))
 
     @app.get("/api/health")
     async def health() -> dict[str, Any]:
