@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   featurePresentation,
+  lightningStyle,
   militaryBadge,
   presentationFor,
   severityColor,
@@ -128,6 +129,30 @@ describe("militaryBadge", () => {
     expect(badge!.title).toContain("address-block");
     expect(badge!.title).toContain("low");
     expect(badge!.title.toLowerCase()).toContain("not authoritative");
+  });
+});
+
+describe("lightningStyle (LIGHTNING-FR-006)", () => {
+  it("ramps cluster color and radius UP with flash count (density is multi-channel)", () => {
+    const ls = lightningStyle();
+    // Both ramps are ascending in their stop thresholds, so a denser cluster is
+    // always drawn bigger AND hotter — count is never the only channel.
+    const radii = ls.clusterRadius.steps;
+    const colors = ls.clusterColor.steps;
+    expect(radii.length).toBeGreaterThan(0);
+    expect(colors.length).toBe(radii.length);
+    for (let i = 1; i < radii.length; i++) {
+      expect(radii[i]![0]).toBeGreaterThan(radii[i - 1]![0]); // ascending count stops
+      expect(radii[i]![1]).toBeGreaterThan(radii[i - 1]![1]); // ascending radius
+    }
+    expect(radii[0]![1]).toBeGreaterThan(ls.clusterRadius.base); // first step grows the base
+  });
+
+  it("gives unclustered flashes a smaller dot than the smallest cluster bubble", () => {
+    const ls = lightningStyle();
+    expect(ls.flashRadius).toBeLessThan(ls.clusterRadius.base);
+    expect(ls.flashColor).toBeTruthy();
+    expect(ls.countColor).toBeTruthy();
   });
 });
 

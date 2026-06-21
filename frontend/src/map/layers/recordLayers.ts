@@ -10,6 +10,7 @@ import {
 import { isOnWatchlist } from "../../state/selectors";
 import { fusionMeta } from "../../types/records";
 import type {
+  FeatureType,
   GeoFeatureRecord,
   GeoJSONGeometry,
   GeoJSONPoint,
@@ -92,33 +93,78 @@ export function trackFeatureCollection(
   return { type: "FeatureCollection", features };
 }
 
-/** Features for all geo-features (TFRs, fires, geofences, …). */
+/** Build one map feature from a geo-feature record (color/symbol via registry). */
+function geoFeatureToMapFeature(feat: GeoFeatureRecord): MapFeature {
+  const p = featurePresentation(feat);
+  return {
+    type: "Feature",
+    geometry: feat.geometry,
+    properties: {
+      id: feat.id,
+      kind: "feature",
+      layer: p.layer,
+      label: feat.label ?? feat.id,
+      color: p.color,
+      symbol: p.symbol,
+      rotateByHeading: false,
+      heading: 0,
+      locallyReceived: false,
+      predicted: false,
+      subtype: feat.feature_type,
+      activeSource: "",
+      fusedCount: 1,
+      isToi: false,
+    },
+  };
+}
+
+// Lightning point features are split into their own MapLibre source so that
+// source can carry `cluster: true` (clustering is per-source; the shared feature
+// source also holds polygons, which can't cluster). The split keys off
+// feature_type AND Point geometry — MapLibre clustering requires points, so a
+// (future, not-yet-emitted) non-point lightning_cluster stays on the generic
+// path rather than breaking the cluster index. LIGHTNING-FR-006 / PRD §24.3.
+const CLUSTERED_FEATURE_TYPES: ReadonlySet<FeatureType> = new Set<FeatureType>([
+  "lightning_flash",
+  "lightning_cluster",
+]);
+
+/** Whether a feature is routed to the dedicated clustered lightning source. */
+export function isLightningFeature(feat: GeoFeatureRecord): boolean {
+  return (
+    CLUSTERED_FEATURE_TYPES.has(feat.feature_type) &&
+    feat.geometry?.type === "Point"
+  );
+}
+
+/** Features for all geo-features EXCEPT clustered lightning (TFRs, fires, …).
+ *
+ * Lightning points are excluded here and emitted by `lightningFeatureCollection`
+ * into a separate clustered source, so a feature is never drawn twice.
+ */
 export function featureFeatureCollection(
   geoFeatures: Map<string, GeoFeatureRecord>,
 ): FeatureCollection {
   const features: MapFeature[] = [];
   for (const feat of geoFeatures.values()) {
-    const p = featurePresentation(feat);
-    features.push({
-      type: "Feature",
-      geometry: feat.geometry,
-      properties: {
-        id: feat.id,
-        kind: "feature",
-        layer: p.layer,
-        label: feat.label ?? feat.id,
-        color: p.color,
-        symbol: p.symbol,
-        rotateByHeading: false,
-        heading: 0,
-        locallyReceived: false,
-        predicted: false,
-        subtype: feat.feature_type,
-        activeSource: "",
-        fusedCount: 1,
-        isToi: false,
-      },
-    });
+    if (isLightningFeature(feat)) continue; // routed to the clustered lightning source
+    features.push(geoFeatureToMapFeature(feat));
+  }
+  return { type: "FeatureCollection", features };
+}
+
+/** Lightning point features for the dedicated clustered source (LIGHTNING-FR-006).
+ *
+ * Only Point-geometry lightning lands here (see `isLightningFeature`) because the
+ * map's `aether-lightning` source sets `cluster: true`, which requires points.
+ */
+export function lightningFeatureCollection(
+  geoFeatures: Map<string, GeoFeatureRecord>,
+): FeatureCollection {
+  const features: MapFeature[] = [];
+  for (const feat of geoFeatures.values()) {
+    if (!isLightningFeature(feat)) continue;
+    features.push(geoFeatureToMapFeature(feat));
   }
   return { type: "FeatureCollection", features };
 }
