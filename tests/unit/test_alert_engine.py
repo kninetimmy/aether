@@ -28,6 +28,7 @@ from aether.schema.geometry import Point
 from aether.schema.records import (
     Classification,
     EventRecord,
+    GeoFeatureRecord,
     Record,
     SourceStatusRecord,
     TrackRecord,
@@ -130,6 +131,27 @@ def _source_status(status: str, source: str = "local_adsb") -> SourceStatusRecor
     )
 
 
+def _quake(
+    *,
+    magnitude: float | None = 5.0,
+    lon: float = -95.0,
+    lat: float = 40.0,
+    id: str = "earthquake:usgs:nc1",
+) -> GeoFeatureRecord:
+    return GeoFeatureRecord(
+        id=id,
+        source="usgs",
+        observed_at=T0,
+        received_at=T0,
+        published_at=T0,
+        correlation_key=id,
+        feature_type="earthquake",
+        geometry=Point(coordinates=[lon, lat]),
+        label=f"M{magnitude}" if magnitude is not None else "earthquake",
+        attributes={"magnitude": magnitude},
+    )
+
+
 def _event(code: str, *, event_type: str = "emergency_squawk", id: str = "evt-1") -> EventRecord:
     return EventRecord(
         id=id,
@@ -147,6 +169,8 @@ def _event(code: str, *, event_type: str = "emergency_squawk", id: str = "evt-1"
 def _change(record: Record, *, op: str | None = None) -> StateChange:
     if isinstance(record, TrackRecord):
         kind, op = "track", op or "upsert"
+    elif isinstance(record, GeoFeatureRecord):
+        kind, op = "feature", op or "upsert"
     elif isinstance(record, SourceStatusRecord):
         kind, op = "source_status", op or "upsert"
     elif isinstance(record, EventRecord):
@@ -341,6 +365,85 @@ def test_remove_rule_forgets_its_firings() -> None:
     assert engine.rule_count == 0
     # With the rule gone, nothing evaluates (and no stale firing lingers).
     assert engine.evaluate(_change(_aircraft(squawk=None))) == []
+
+
+# --- geo-feature (environmental) alerts: earthquakes, USGS-FR-005 -----------
+
+
+def _quake_rule(**kw: Any) -> AlertRule:
+    """A magnitude rule over earthquakes — the M5 environmental-alert default shape."""
+    return _rule(
+        subject_types=kw.pop("subject_types", ["earthquake"]),
+        conditions=kw.pop(
+            "conditions",
+            [AlertCondition(field="attributes.magnitude", operator="greater_than", value=4.5)],
+        ),
+        transition=kw.pop("transition", "change"),
+        **kw,
+    )
+
+
+def test_subject_type_of_geo_feature_is_its_feature_type() -> None:
+    # A rule targets the specific layer ("earthquake"), not the bare "feature" kind —
+    # so a quake-magnitude rule never matches a fire/TFR/lightning feature.
+    from aether.alerts.engine import subject_type_of
+
+    assert subject_type_of(_quake()) == "earthquake"
+
+
+def test_earthquake_magnitude_rule_fires_on_feature_change() -> None:
+    # A geo-feature now DRIVES the engine (was excluded pre-M5). The ``change``
+    # transition makes each new/revised quake a single point-in-time alert.
+    clock = _Clock(T0)
+    engine = _engine(clock, [_quake_rule()])
+
+    assert engine.evaluate(_change(_quake(magnitude=3.0))) == []  # below M4.5 → no fire
+    out = engine.evaluate(_change(_quake(magnitude=5.2, id="earthquake:usgs:big")))
+    assert len(out) == 1
+    assert out[0].state == "open"
+    assert out[0].subject_id == "earthquake:usgs:big"
+    assert out[0].severity == "high"
+
+
+def test_earthquake_change_rule_does_not_refire_same_quake() -> None:
+    # The same quake re-upserted (a revision that still matches) is not a *change* in
+    # the rule's level, so it fires once, not on every update.
+    clock = _Clock(T0)
+    engine = _engine(clock, [_quake_rule(cooldown_s=0.0)])
+    assert len(engine.evaluate(_change(_quake(magnitude=6.0)))) == 1
+    assert engine.evaluate(_change(_quake(magnitude=6.1))) == []  # still above → no new change
+
+
+def test_subject_type_mismatch_geo_feature_does_not_fire() -> None:
+    # A rule scoped to a different feature layer ignores an earthquake.
+    clock = _Clock(T0)
+    fire_rule = _rule(
+        subject_types=["fire_detection"],
+        conditions=[
+            AlertCondition(field="attributes.magnitude", operator="greater_than", value=0.0)
+        ],
+        transition="change",
+    )
+    engine = _engine(clock, [fire_rule])
+    assert engine.evaluate(_change(_quake(magnitude=9.0))) == []
+
+
+def test_feature_removal_auto_resolves_open_enter_alert() -> None:
+    # An ENTER-transition rule on a feature opens an alert when the quake appears; when
+    # the quake ages out of the feed (a feature remove) the open alert auto-resolves —
+    # the same lifecycle a track gets, so feature-driven enter-rules don't leak.
+    clock = _Clock(T0)
+    engine = _engine(clock, [_quake_rule(transition="enter")])
+    opened = engine.evaluate(_change(_quake(magnitude=5.0)))
+    assert len(opened) == 1 and opened[0].state == "open"
+
+    clock.t = T0 + timedelta(seconds=30)
+    resolved = engine.evaluate(
+        StateChange(seq=2, op="remove", kind="feature", id="earthquake:usgs:nc1", record=None)
+    )
+    assert len(resolved) == 1
+    assert resolved[0].id == opened[0].id
+    assert resolved[0].state == "resolved"
 
 
 # --- preview (the /test endpoint core) --------------------------------------

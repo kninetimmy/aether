@@ -21,7 +21,7 @@ from aether.alerts.engine import AlertEngine
 from aether.schema.alert_rule import AlertCondition, AlertRule, AlertRuleCreate
 from aether.schema.geofence import CircleShape, Geofence, GeofenceCreate
 from aether.schema.geometry import Point
-from aether.schema.records import EventRecord, Record, TrackRecord
+from aether.schema.records import EventRecord, GeoFeatureRecord, Record, TrackRecord
 from aether.state.live import StateChange
 
 T0 = datetime(2026, 6, 19, 12, 0, 0, tzinfo=UTC)
@@ -112,9 +112,31 @@ def _track(
     )
 
 
+def _quake(
+    lon: float,
+    lat: float,
+    *,
+    magnitude: float = 5.0,
+    id: str = "earthquake:usgs:nc1",
+) -> GeoFeatureRecord:
+    return GeoFeatureRecord(
+        id=id,
+        source="usgs",
+        observed_at=T0,
+        received_at=T0,
+        published_at=T0,
+        correlation_key=id,
+        feature_type="earthquake",
+        geometry=Point(coordinates=[lon, lat]),
+        attributes={"magnitude": magnitude},
+    )
+
+
 def _change(record: Record, *, op: str | None = None) -> StateChange:
     if isinstance(record, TrackRecord):
         kind, op = "track", op or "upsert"
+    elif isinstance(record, GeoFeatureRecord):
+        kind, op = "feature", op or "upsert"
     elif isinstance(record, EventRecord):
         kind, op = "event", op or "event"
     else:  # pragma: no cover
@@ -188,6 +210,60 @@ def test_distance_below_against_station() -> None:
     # On the station → distance 0 < 10 km → fires.
     out = engine.evaluate(_change(_track(STATION_LON, STATION_LAT)))
     assert len(out) == 1 and out[0].state == "open"
+
+
+def test_distance_below_fires_on_earthquake_feature() -> None:
+    # A point geo-feature (earthquake) reaches the SAME geometry path a track does, so
+    # an operator can alert on a quake within N metres of the station (USGS-FR-005).
+    clock = _Clock(T0)
+    rule = _rule(
+        subject_types=["earthquake"],
+        conditions=[AlertCondition(field="geometry", operator="distance_below", threshold=10000.0)],
+        transition="enter",
+    )
+    engine = _engine(clock, [rule])
+    out = engine.evaluate(_change(_quake(STATION_LON, STATION_LAT)))  # on the station
+    assert len(out) == 1 and out[0].state == "open"
+    # A quake well outside the radius does not fire.
+    assert engine.evaluate(_change(_quake(-80.0, 40.0, id="earthquake:usgs:far"))) == []
+
+
+def test_elevation_crossed_unevaluable_for_feature() -> None:
+    # A feature has no altitude — an elevation angle is undefined — so the leaf is an
+    # honest unknown (no fire), never a bogus 0 deg (PRD §37).
+    clock = _Clock(T0)
+    rule = _rule(
+        subject_types=["earthquake"],
+        conditions=[AlertCondition(field="geometry", operator="elevation_crossed", threshold=10.0)],
+        transition="enter",
+    )
+    engine = _engine(clock, [rule])
+    assert engine.evaluate(_change(_quake(STATION_LON, STATION_LAT))) == []
+
+
+def test_record_point_extraction() -> None:
+    from aether.schema.geometry import Polygon
+
+    # Track with a point → its coordinates + altitude.
+    assert contextual._record_point(_track(-95.0, 40.0, alt_m=3000.0)) == (-95.0, 40.0, 3000.0)
+    # Track without geometry → None (unevaluable).
+    assert contextual._record_point(_track(-95.0, 40.0, geometry=False)) is None
+    # Point feature → coordinates with no altitude.
+    assert contextual._record_point(_quake(-95.0, 40.0)) == (-95.0, 40.0, None)
+    # Non-point feature (a polygon TFR-like) → None: areal distance lands with that slice.
+    polygon_feature = GeoFeatureRecord(
+        id="tfr:1",
+        source="faa",
+        observed_at=T0,
+        received_at=T0,
+        published_at=T0,
+        correlation_key="tfr:1",
+        feature_type="tfr",
+        geometry=Polygon(
+            coordinates=[[[-95.0, 40.0], [-94.0, 40.0], [-94.0, 41.0], [-95.0, 40.0]]]
+        ),
+    )
+    assert contextual._record_point(polygon_feature) is None
 
 
 def test_distance_above_against_geofence_center() -> None:
