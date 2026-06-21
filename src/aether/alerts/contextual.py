@@ -32,8 +32,8 @@ from aether.alerts.conditions import (
 )
 from aether.schema.alert_rule import AlertCondition, AlertRule
 from aether.schema.geofence import Geofence
-from aether.schema.geometry import Position
-from aether.schema.records import Record, TrackRecord
+from aether.schema.geometry import Point, Position
+from aether.schema.records import GeoFeatureRecord, Record, TrackRecord
 
 log = logging.getLogger(__name__)
 
@@ -91,6 +91,25 @@ class ContextResult:
     evaluable: bool
     level: bool
     discrete: bool
+
+
+def _record_point(record: Record) -> tuple[float, float, float | None] | None:
+    """A record's representative ``(lon, lat, altitude_m)`` for geometry leaves, or None.
+
+    A track contributes its point geometry plus its altitude. A geo-feature contributes
+    its ``Point`` geometry with **no** altitude (a quake's depth or a fire pixel is not
+    an elevation, so altitude stays ``None`` → ``elevation_crossed`` is unevaluable for
+    a feature, an honest unknown rather than a bogus 0 deg). A track without geometry,
+    or a feature whose geometry is not a ``Point`` (a polygon TFR — areal distance lands
+    with that slice), yields ``None`` so the geometry leaf reports unevaluable.
+    """
+    if isinstance(record, TrackRecord):
+        if record.geometry is None:
+            return None
+        return record.geometry.coordinates[0], record.geometry.coordinates[1], record.altitude_m
+    if isinstance(record, GeoFeatureRecord) and isinstance(record.geometry, Point):
+        return record.geometry.coordinates[0], record.geometry.coordinates[1], None
+    return None
 
 
 class ContextualEvaluator:
@@ -287,16 +306,18 @@ class ContextualEvaluator:
     ) -> tuple[bool, bool]:
         """A geometry leaf's ``(level, evaluable)``.
 
-        Geometry needs a track point: a non-``TrackRecord`` or a track with no
-        ``geometry`` makes the leaf unevaluable (can't test containment/distance/
-        elevation without a position). Each operator then dispatches to the pure
-        :mod:`aether.alerts.geo` predicates against the synced geofence / station.
+        Geometry needs a representative point — a track's position+altitude, or a
+        point geo-feature's location (an earthquake epicentre, a FIRMS pixel; M5
+        environmental alerts, USGS-FR-005). A record with no usable point (a track
+        without geometry, or a non-point feature such as a polygon TFR) makes the leaf
+        unevaluable (can't test containment/distance/elevation without a position).
+        Each operator then dispatches to the pure :mod:`aether.alerts.geo` predicates
+        against the synced geofence / station.
         """
-        if not isinstance(record, TrackRecord) or record.geometry is None:
+        point = _record_point(record)
+        if point is None:
             return False, False
-        lon = record.geometry.coordinates[0]
-        lat = record.geometry.coordinates[1]
-        alt_m = record.altitude_m
+        lon, lat, alt_m = point
         if op in ("entered_geofence", "exited_geofence"):
             return self._eval_geofence(op, rule, lon, lat, alt_m)
         if op in ("distance_below", "distance_above"):

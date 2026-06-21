@@ -66,6 +66,7 @@ from aether.schema.geofence import Geofence
 from aether.schema.records import (
     AlertRecord,
     EventRecord,
+    GeoFeatureRecord,
     Record,
     SourceStatusRecord,
     TrackRecord,
@@ -80,10 +81,14 @@ log = logging.getLogger(__name__)
 #: rather than borrowing the triggering record's.
 ALERT_SOURCE = "alert-engine"
 
-#: State kinds that can drive a rule. Alerts and features never do (a rule reacts to
-#: the world, not to its own output), so feeding an alert change back in terminates
-#: the observer→publish→observer loop immediately (PRD §37 — no runaway).
-_DRIVING_KINDS: frozenset[StateKind] = frozenset({"track", "source_status", "event"})
+#: State kinds that can drive a rule. **Alerts** never do — they are the engine's own
+#: output, so feeding an alert change back in would re-enter the observer→publish→
+#: observer loop forever (PRD §37 — no runaway). **Geo-features do** drive (M5): an
+#: earthquake/fire is an observation of the world (the environmental-alert surface,
+#: USGS-FR-005), evaluated like a track/event change. Volume note: a future high-rate
+#: feature feed (GLM lightning flashes) would run every flash through evaluation, so
+#: that slice relies on clustering/aggregation upstream (PRD §11.10 LIGHTNING-FR-006).
+_DRIVING_KINDS: frozenset[StateKind] = frozenset({"track", "feature", "source_status", "event"})
 
 
 @dataclass
@@ -104,13 +109,17 @@ class _Firing:
 def subject_type_of(record: Record) -> str:
     """The rule ``subject_types`` token a record matches against (PRD §20.1).
 
-    Tracks match on their ``track_type`` (``aircraft``/``vessel``/…), source-status
-    records on the literal ``"source"``, and events on their free-form
-    ``event_type``; anything else falls back to its ``kind`` so a future record type
-    is still addressable rather than silently unmatchable.
+    Tracks match on their ``track_type`` (``aircraft``/``vessel``/…), geo-features on
+    their ``feature_type`` (``earthquake``/``fire_detection``/…) so a rule targets the
+    specific environmental layer rather than every overlay, source-status records on
+    the literal ``"source"``, and events on their free-form ``event_type``; anything
+    else falls back to its ``kind`` so a future record type is still addressable rather
+    than silently unmatchable.
     """
     if isinstance(record, TrackRecord):
         return record.track_type
+    if isinstance(record, GeoFeatureRecord):
+        return record.feature_type
     if isinstance(record, SourceStatusRecord):
         return "source"
     if isinstance(record, EventRecord):
@@ -410,15 +419,17 @@ class AlertEngine:
         return []
 
     def _on_remove(self, kind: StateKind, removed_id: str, now: datetime) -> list[AlertRecord]:
-        """Auto-resolve open alerts for a removed track and forget its firing memory.
+        """Auto-resolve open alerts for a removed track/feature and forget its memory.
 
-        Only tracks are continuous subjects that get removed (expiry/handoff, PRD
-        §15.4). For each rule, the removed subject's level drops to False: an open
-        enter-rule alert auto-resolves, and a per-subject firing entry is forgotten so
-        the firing map stays bounded (PRD §37). A shared ``dedup_key`` entry is kept
-        (other subjects may still hold the group) but its level/open is cleared.
+        Tracks and geo-features are the continuous subjects that get removed (track
+        expiry/handoff, PRD §15.4; a feature aging out of its feed). For each rule, the
+        removed subject's level drops to False: an open enter-rule alert auto-resolves,
+        and a per-subject firing entry is forgotten so the firing map stays bounded
+        (PRD §37). A shared ``dedup_key`` entry is kept (other subjects may still hold
+        the group) but its level/open is cleared. Source-status/event/alert removals
+        never reach here as continuous subjects.
         """
-        if kind != "track":
+        if kind not in ("track", "feature"):
             return []
         out: list[AlertRecord] = []
         for rule in self._rules.values():

@@ -6,16 +6,18 @@ may be disabled by default") with a *stable* id so seeding is idempotent — a
 re-seed never duplicates one, and an operator's edits to a seeded rule survive a
 restart (the seeder only inserts ids that are absent).
 
-Scope of this slice: only templates whose conditions reference fields/sources that
-already exist in the COP and have settled semantics — aircraft emergency squawks,
-locally-received military aircraft, and source-offline. The remaining PRD §12
-templates are seeded by the milestone that owns their source/feature, so a template
-never references a field whose meaning isn't defined yet:
+Scope: only templates whose conditions reference fields/sources that already exist in
+the COP and have settled semantics — aircraft emergency squawks, locally-received
+military aircraft, source-offline, and (M5) earthquakes once the USGS layer ships
+(USGS-FR-005). The remaining PRD §12 templates are seeded by the milestone that owns
+their source/feature, so a template never references a field whose meaning isn't
+defined yet:
 
 - geofence enter/exit/altitude (#6, #7), watchlist aircraft (#5): the alert engine
   slice (geofence containment + watchlist matching).
 - APRS emergency/message (#8, #10), AIS (#22, #23): with their detail semantics.
-- lightning/FIRMS/earthquake/TFR/satellite/balloon (#11–#21): M5/M6.
+- FIRMS/lightning/TFR/satellite/balloon (#11–#21): the M5/M6 slice that lands each
+  source (earthquake is done; FIRMS/lightning seed with their alert wiring).
 - disk-budget/time-sync (#25, #26): with the system-event sources that raise them.
 
 Templates are defined as ``(id, AlertRuleCreate)`` pairs and stamped with ``now``
@@ -86,6 +88,54 @@ _TEMPLATES: tuple[tuple[str, AlertRuleCreate], ...] = (
             cooldown_s=1800.0,
             channels=["dashboard"],
             description="A data source stopped reporting beyond its staleness window (§12 #24).",
+        ),
+    ),
+    # -- M5 environmental alerts (earthquakes, USGS-FR-005, PRD §12 #11/#19) --------
+    # An earthquake is a point-in-time occurrence, so these use the ``change``
+    # transition (one alert per new/revised quake, cooldown-gated) rather than an
+    # open-until-resolved level — there is no natural "exit" for a quake. Magnitude
+    # is the reported USGS value; the COP is NOT authoritative (PRD §11.2/§37).
+    (
+        "rule-earthquake-significant",
+        AlertRuleCreate(
+            name="Significant earthquake",
+            severity="medium",
+            subject_types=["earthquake"],
+            conditions=[
+                AlertCondition(field="attributes.magnitude", operator="greater_than", value=4.5)
+            ],
+            enabled=False,
+            transition="change",
+            channels=["dashboard", "browser"],
+            description=(
+                "USGS reports an earthquake greater than M4.5 inside the AOI. Reported "
+                "magnitude, not an independently verified one; an 'automatic' (un-reviewed) "
+                "solution may be revised (PRD USGS-FR-003)."
+            ),
+        ),
+    ),
+    (
+        "rule-earthquake-nearby",
+        AlertRuleCreate(
+            name="Nearby earthquake",
+            severity="high",
+            subject_types=["earthquake"],
+            conditions=[
+                AlertCondition(field="attributes.magnitude", operator="greater_than", value=3.0),
+                # Distance from the home station, in metres (~135 NM). With no station
+                # configured (lat/lon 0,0) this leaf is unevaluable, so the rule stays
+                # inert and visibly does not fire — never measures from null island
+                # (PRD §5/§37). Set AETHER_STATION_LAT/_LON to activate it.
+                AlertCondition(field="geometry", operator="distance_below", threshold=250_000.0),
+            ],
+            enabled=False,
+            transition="change",
+            channels=["dashboard", "browser"],
+            description=(
+                "USGS reports an earthquake greater than M3.0 within ~135 NM of the home "
+                "station. Requires a configured station position; reported magnitude, not "
+                "verified (PRD USGS-FR-003)."
+            ),
         ),
     ),
 )
