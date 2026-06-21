@@ -1,8 +1,9 @@
 """Default alert-rule templates (PRD §12, ALERT-FR-008).
 
 Guards the shape contract the seeder relies on: every template ships disabled with a
-stable, unique id, and the M5 environmental templates (earthquakes, USGS-FR-005)
-target the specific ``earthquake`` feature layer with a reported-magnitude condition.
+stable, unique id, and the M5 environmental templates target the specific feature
+layer — earthquakes (USGS-FR-005) by reported magnitude, FIRMS active fire
+(FIRMS-FR-005) by reported FRP and distance from the station.
 """
 
 from __future__ import annotations
@@ -39,3 +40,22 @@ def test_earthquake_templates_target_earthquake_layer() -> None:
     assert nearby.subject_types == ["earthquake"]
     ops = {c.operator for c in nearby.conditions}
     assert ops == {"greater_than", "distance_below"}  # magnitude AND distance-from-station
+
+
+def test_fire_templates_target_fire_detection_layer() -> None:
+    by_id = {t.id: t for t in default_rule_templates(T0)}
+
+    intensity = by_id["rule-fire-high-intensity"]
+    assert intensity.subject_types == ["fire_detection"]
+    assert intensity.transition == "change"  # one alert per newly-seen detection
+    cond = intensity.conditions[0]
+    assert (cond.field, cond.operator, cond.value) == (
+        "attributes.frp_mw",
+        "greater_than",
+        50.0,
+    )
+
+    nearby = by_id["rule-fire-nearby"]
+    assert nearby.subject_types == ["fire_detection"]
+    # PRD §12 #13 is "within a configured radius" — distance from the station only.
+    assert [c.operator for c in nearby.conditions] == ["distance_below"]
