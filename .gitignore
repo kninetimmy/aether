@@ -8,6 +8,13 @@ node_modules/
 frontend/dist/
 *.tsbuildinfo
 
+# Operator-local config (station coords, API keys, toggles) — never committed
+# (PRD §5). The committed template is `.env.example`; run.sh copies it to `.env`.
+.env
+
+# run.sh runtime dir: broker log + PID files (operator-local)
+.aether/
+
 # SQLite persistence store + WAL sidecars (M4; operator-local, never committed)
 *.db
 *.db-wal
