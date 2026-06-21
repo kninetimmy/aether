@@ -446,6 +446,66 @@ def test_feature_removal_auto_resolves_open_enter_alert() -> None:
     assert resolved[0].state == "resolved"
 
 
+# --- geo-feature (environmental) alerts: FIRMS active fire, FIRMS-FR-005 -----
+
+
+def _fire(
+    *,
+    frp_mw: float | None = 80.0,
+    lon: float = -95.0,
+    lat: float = 40.0,
+    id: str = "fire:firms:nc1",
+) -> GeoFeatureRecord:
+    return GeoFeatureRecord(
+        id=id,
+        source="firms",
+        observed_at=T0,
+        received_at=T0,
+        published_at=T0,
+        correlation_key=id,
+        feature_type="fire_detection",
+        geometry=Point(coordinates=[lon, lat]),
+        label="Fire detection",
+        attributes={"frp_mw": frp_mw},
+    )
+
+
+def test_fire_detection_drives_engine_by_frp() -> None:
+    # A FIRMS fire_detection drives the engine like any other geo-feature, but on its own
+    # layer: it reports subject_type "fire_detection" (never "earthquake"), and the
+    # high-intensity default fires on reported FRP above its threshold (change transition,
+    # one alert per newly-seen detection).
+    from aether.alerts.engine import subject_type_of
+
+    assert subject_type_of(_fire()) == "fire_detection"
+
+    rule = _rule(
+        subject_types=["fire_detection"],
+        conditions=[AlertCondition(field="attributes.frp_mw", operator="greater_than", value=50.0)],
+        transition="change",
+    )
+    engine = _engine(_Clock(T0), [rule])
+
+    assert engine.evaluate(_change(_fire(frp_mw=12.0))) == []  # below 50 MW → no fire
+    out = engine.evaluate(_change(_fire(frp_mw=120.0, id="fire:firms:big")))
+    assert len(out) == 1
+    assert out[0].state == "open"
+    assert out[0].subject_id == "fire:firms:big"
+
+
+def test_fire_detection_unknown_frp_does_not_fire() -> None:
+    # FIRMS may not report FRP for a row; greater_than on a null attribute is unevaluable,
+    # so the high-intensity rule stays honestly inert (no fire) rather than firing on a
+    # bogus 0 — the same fail-visibly stance as elevation on a feature (PRD §37).
+    rule = _rule(
+        subject_types=["fire_detection"],
+        conditions=[AlertCondition(field="attributes.frp_mw", operator="greater_than", value=50.0)],
+        transition="change",
+    )
+    engine = _engine(_Clock(T0), [rule])
+    assert engine.evaluate(_change(_fire(frp_mw=None))) == []
+
+
 # --- preview (the /test endpoint core) --------------------------------------
 
 

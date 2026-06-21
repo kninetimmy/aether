@@ -16,8 +16,8 @@ defined yet:
 - geofence enter/exit/altitude (#6, #7), watchlist aircraft (#5): the alert engine
   slice (geofence containment + watchlist matching).
 - APRS emergency/message (#8, #10), AIS (#22, #23): with their detail semantics.
-- FIRMS/lightning/TFR/satellite/balloon (#11–#21): the M5/M6 slice that lands each
-  source (earthquake is done; FIRMS/lightning seed with their alert wiring).
+- lightning/TFR/satellite/balloon (#11/#12, #15–#21): the M5/M6 slice that lands each
+  source (earthquakes #14 and FIRMS detections #13 are done; the rest seed with theirs).
 - disk-budget/time-sync (#25, #26): with the system-event sources that raise them.
 
 Templates are defined as ``(id, AlertRuleCreate)`` pairs and stamped with ``now``
@@ -135,6 +135,56 @@ _TEMPLATES: tuple[tuple[str, AlertRuleCreate], ...] = (
                 "USGS reports an earthquake greater than M3.0 within ~135 NM of the home "
                 "station. Requires a configured station position; reported magnitude, not "
                 "verified (PRD USGS-FR-003)."
+            ),
+        ),
+    ),
+    # -- M5 environmental alerts (FIRMS active fire, PRD §12 #13, FIRMS-FR-005) ------
+    # A FIRMS record is one satellite thermal-anomaly pixel at one acquisition time —
+    # NOT a confirmed wildfire (FIRMS-FR-005) and not a continuously-updated track. So,
+    # like earthquakes, these fire on the ``change`` transition (one alert per newly-seen
+    # detection, cooldown-gated) rather than holding an open level with no natural exit.
+    # "high-intensity" filters on reported fire radiative power (FRP, MW) and works AOI-
+    # wide; "nearby" filters on distance from the home station and is inert (visibly does
+    # not fire) until a station is configured — it never measures from null island.
+    (
+        "rule-fire-high-intensity",
+        AlertRuleCreate(
+            name="High-intensity fire detection",
+            severity="medium",
+            subject_types=["fire_detection"],
+            conditions=[
+                AlertCondition(field="attributes.frp_mw", operator="greater_than", value=50.0)
+            ],
+            enabled=False,
+            transition="change",
+            channels=["dashboard", "browser"],
+            description=(
+                "NASA FIRMS reports an active-fire detection above 50 MW fire radiative "
+                "power inside the AOI. A satellite thermal anomaly, NOT a confirmed "
+                "wildfire; FRP is the reported pixel value (PRD FIRMS-FR-004/005)."
+            ),
+        ),
+    ),
+    (
+        "rule-fire-nearby",
+        AlertRuleCreate(
+            name="Nearby fire detection",
+            severity="high",
+            subject_types=["fire_detection"],
+            conditions=[
+                # Distance from the home station, in metres (~27 NM). With no station
+                # configured (lat/lon 0,0) this leaf is unevaluable, so the rule stays
+                # inert and visibly does not fire — never measures from null island
+                # (PRD §5/§37). Set AETHER_STATION_LAT/_LON to activate it.
+                AlertCondition(field="geometry", operator="distance_below", threshold=50_000.0),
+            ],
+            enabled=False,
+            transition="change",
+            channels=["dashboard", "browser"],
+            description=(
+                "NASA FIRMS reports an active-fire detection within ~27 NM of the home "
+                "station. Requires a configured station position; a satellite thermal "
+                "anomaly, NOT a confirmed wildfire (PRD §12 #13, FIRMS-FR-005)."
             ),
         ),
     ),
