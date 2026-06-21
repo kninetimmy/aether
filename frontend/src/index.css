@@ -578,3 +578,227 @@ ul {
   color: var(--muted);
   text-transform: uppercase;
 }
+
+/* Alerts (PRD §24.6): firing-alert list + the rule editor. Severity is always
+   paired with a text label (the severity word / state word), never color alone
+   (§24.9). */
+.severity-color,
+.sev-info {
+  --sev: #62d0ff;
+}
+.sev-low {
+  --sev: #5ce6b4;
+}
+.sev-medium {
+  --sev: #ffd27f;
+}
+.sev-high {
+  --sev: #ff9f43;
+}
+.sev-critical {
+  --sev: #ff4d6d;
+}
+
+.alert-list,
+.rule-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.alert-row {
+  display: flex;
+  gap: 8px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--sev, var(--line));
+  border-radius: 3px;
+}
+.alert-main {
+  flex: 1;
+  min-width: 0;
+}
+.alert-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.alert-title {
+  flex: 1;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.alert-age {
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.alert-summary {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 2px 0;
+}
+.alert-actions,
+.rule-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+}
+.alert-error {
+  color: #ff6b6b;
+  font-size: 12px;
+  margin: 4px 0;
+}
+
+/* Rule editor (config) */
+.rule-loaderror {
+  font-size: 12px;
+  color: #ffb347;
+  margin: 4px 0;
+}
+.rule-row {
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--sev, var(--line));
+  border-radius: 3px;
+}
+.rule-row.disabled {
+  opacity: 0.6;
+}
+.rule-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.rule-sev {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--sev, var(--muted));
+}
+.rule-name {
+  flex: 1;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rule-off {
+  font-size: 10px;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 0 4px;
+}
+.rule-meta {
+  margin: 2px 0;
+}
+.rule-preview {
+  font-size: 12px;
+  color: var(--accent);
+  margin-top: 4px;
+}
+.rule-delete,
+.cond-remove {
+  color: #ff6b6b;
+}
+
+.rule-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  margin-bottom: 8px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+}
+.rule-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+}
+.rule-field > span {
+  color: var(--muted);
+}
+.rule-field input,
+.rule-field select,
+.rule-field textarea,
+.cond-row input,
+.cond-row select {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 3px 5px;
+  font: inherit;
+}
+.rule-suggestions,
+.rule-row-inline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+  font-size: 12px;
+}
+.chip {
+  font-size: 11px;
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.rule-conditions,
+.rule-channels {
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 6px;
+  margin: 0;
+}
+.rule-conditions legend,
+.rule-channels legend {
+  font-size: 11px;
+  color: var(--muted);
+}
+.rule-channels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.cond-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 4px;
+  align-items: center;
+}
+.cond-field {
+  flex: 1 1 90px;
+  min-width: 70px;
+}
+.cond-value {
+  flex: 1 1 80px;
+  min-width: 60px;
+}
+.cond-remove {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+}
+.rule-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 4px;
+}
+.rule-save {
+  color: var(--bg);
+  background: var(--accent);
+  border-color: var(--accent);
+}

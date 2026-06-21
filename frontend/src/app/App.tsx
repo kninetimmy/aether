@@ -6,6 +6,8 @@ import { useEffect, useState } from "react";
 import { MapView } from "../features/map/MapView";
 import { EventFeed } from "../features/map/EventFeed";
 import { FilterPanel } from "../features/filters/FilterPanel";
+import { AlertsPanel } from "../features/alerts/AlertsPanel";
+import { AlertRuleEditor } from "../features/alerts/AlertRuleEditor";
 import { LayerControl } from "../features/sources/LayerControl";
 import { SourceHealthPanel } from "../features/sources/SourceHealthPanel";
 import { TOIDetailsPanel } from "../features/toi/TOIDetailsPanel";
@@ -116,6 +118,7 @@ export function App() {
             <div className="panel-scroll">
               <LayerControl />
               <FilterPanel />
+              <AlertRuleEditor />
             </div>
           )}
         </aside>
@@ -131,6 +134,7 @@ export function App() {
           {rightOpen && (
             <div className="panel-scroll">
               <TOIDetailsPanel />
+              <AlertsPanel />
               <SourceHealthPanel />
               <TrackList />
             </div>
