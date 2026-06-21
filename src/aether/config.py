@@ -185,6 +185,31 @@ DEFAULT_FIRMS_RADIUS_NM = 500.0
 #: Empty ⇒ show every detection in the AOI; honest labeling carries the class regardless.
 DEFAULT_FIRMS_MIN_CONFIDENCE = ""
 
+#: NOAA GOES GLM lightning feed (M5.6, PRD §11.10, benchmark-gated — see
+#: ``docs/glm-benchmark.md``, verdict *acceptable* on the Pi 5). Off by default; opt in with
+#: ``AETHER_GLM=1``. The live provider reads GLM L2 (LCFA) NetCDF from NOAA's public GOES
+#: Open Data on AWS (no key), so the only gate is the optional ``netCDF4`` parser
+#: (``pip install "aether[lightning]"``) — missing ⇒ one ``offline`` status, never a crash
+#: (LIGHTNING-FR-002). ``fake``/``demo`` (as satellite *or* S3 base) selects the no-hardware
+#: feeder, which needs no parser. ``G19`` is the current GOES-East (use ``G18`` for West).
+DEFAULT_GLM_SATELLITE = "G19"
+#: Empty ⇒ the bucket host is derived from the satellite; set to ``fake`` for the feeder.
+DEFAULT_GLM_S3_BASE = ""
+DEFAULT_GLM_RADIUS_NM = 500.0
+#: Poll cadence. GLM files publish every 20 s; a 60 s poll fetches the ~3 new files each
+#: pass (complete coverage at ~1.6 GB/day per satellite — the benchmark's bandwidth note).
+DEFAULT_GLM_POLL_S = 60.0
+#: Per-poll file cap so a reconnect after an outage catches up to *live* rather than
+#: replaying hours of backlog (LIGHTNING-FR-005 "only the newest required").
+DEFAULT_GLM_MAX_FILES_PER_POLL = 12
+#: On-map lifetime of a transient flash; it ages off via the live-state expiry sweep so an
+#: active storm does not accumulate flashes without bound (10 min by default).
+DEFAULT_GLM_FLASH_TTL_S = 600.0
+DEFAULT_GLM_TIMEOUT_S = 30.0
+#: Keep only ``flash_quality_flag == good_quality`` flashes when set; default emits all and
+#: carries the quality flag as an attribute (honest labeling over silent filtering).
+DEFAULT_GLM_GOOD_QUALITY_ONLY = False
+
 #: Persistence store (M4, PRD §19). SQLite path; the WAL sidecars (`-wal`/`-shm`)
 #: sit alongside it. Live state never depends on this store (PRD §5), so it is off
 #: by default and a slow/failed disk only backs up the writer's own queue.
@@ -430,6 +455,24 @@ class Settings:
     firms_poll_s: float = DEFAULT_FIRMS_POLL_S
     firms_timeout_s: float = DEFAULT_FIRMS_TIMEOUT_S
 
+    #: Run the NOAA GOES GLM lightning adapter alongside the backend (M5.6, PRD §11.10). Off
+    #: by default — opt in with ``AETHER_GLM=1``. Benchmark-gated (``docs/glm-benchmark.md``):
+    #: viable on the Pi 5 at ~1.6 GB/day. Capability-gated on the optional ``netCDF4`` parser
+    #: (missing ⇒ ``offline`` status, never a crash). ``glm_satellite=fake`` (or
+    #: ``glm_s3_base=fake``) selects the no-hardware feeder. The AOI center defaults to the
+    #: station; transient flashes age off after ``glm_flash_ttl_s``.
+    glm: bool = False
+    glm_satellite: str = DEFAULT_GLM_SATELLITE
+    glm_s3_base: str = DEFAULT_GLM_S3_BASE
+    glm_center_lat: float = DEFAULT_STATION_LAT
+    glm_center_lon: float = DEFAULT_STATION_LON
+    glm_radius_nm: float = DEFAULT_GLM_RADIUS_NM
+    glm_poll_s: float = DEFAULT_GLM_POLL_S
+    glm_max_files_per_poll: int = DEFAULT_GLM_MAX_FILES_PER_POLL
+    glm_flash_ttl_s: float = DEFAULT_GLM_FLASH_TTL_S
+    glm_timeout_s: float = DEFAULT_GLM_TIMEOUT_S
+    glm_good_quality_only: bool = DEFAULT_GLM_GOOD_QUALITY_ONLY
+
     #: Persist fused records to SQLite (M4, PRD §19). Off by default — persistence
     #: is a *sibling* bus consumer that never gates serving live state (PRD §5).
     #: Track history is the first consumer; retention/alerts/replay build on the same
@@ -629,6 +672,23 @@ class Settings:
             firms_poll_s=float(os.environ.get("AETHER_FIRMS_POLL_S", DEFAULT_FIRMS_POLL_S)),
             firms_timeout_s=float(
                 os.environ.get("AETHER_FIRMS_TIMEOUT_S", DEFAULT_FIRMS_TIMEOUT_S)
+            ),
+            glm=_env_bool("AETHER_GLM", False),
+            glm_satellite=os.environ.get("AETHER_GLM_SATELLITE", DEFAULT_GLM_SATELLITE),
+            glm_s3_base=os.environ.get("AETHER_GLM_S3_BASE", DEFAULT_GLM_S3_BASE),
+            glm_center_lat=float(os.environ.get("AETHER_GLM_LAT", station_lat)),
+            glm_center_lon=float(os.environ.get("AETHER_GLM_LON", station_lon)),
+            glm_radius_nm=float(os.environ.get("AETHER_GLM_RADIUS_NM", DEFAULT_GLM_RADIUS_NM)),
+            glm_poll_s=float(os.environ.get("AETHER_GLM_POLL_S", DEFAULT_GLM_POLL_S)),
+            glm_max_files_per_poll=int(
+                os.environ.get("AETHER_GLM_MAX_FILES_PER_POLL", DEFAULT_GLM_MAX_FILES_PER_POLL)
+            ),
+            glm_flash_ttl_s=float(
+                os.environ.get("AETHER_GLM_FLASH_TTL_S", DEFAULT_GLM_FLASH_TTL_S)
+            ),
+            glm_timeout_s=float(os.environ.get("AETHER_GLM_TIMEOUT_S", DEFAULT_GLM_TIMEOUT_S)),
+            glm_good_quality_only=_env_bool(
+                "AETHER_GLM_GOOD_QUALITY_ONLY", DEFAULT_GLM_GOOD_QUALITY_ONLY
             ),
             persist=_env_bool("AETHER_PERSIST", False),
             db_path=os.environ.get("AETHER_DB_PATH", DEFAULT_DB_PATH),
