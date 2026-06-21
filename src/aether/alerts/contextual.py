@@ -32,7 +32,7 @@ from aether.alerts.conditions import (
 )
 from aether.schema.alert_rule import AlertCondition, AlertRule
 from aether.schema.geofence import Geofence
-from aether.schema.geometry import Point, Position
+from aether.schema.geometry import MultiPolygon, Point, Polygon, Position
 from aether.schema.records import GeoFeatureRecord, Record, TrackRecord
 
 log = logging.getLogger(__name__)
@@ -109,6 +109,23 @@ def _record_point(record: Record) -> tuple[float, float, float | None] | None:
         return record.geometry.coordinates[0], record.geometry.coordinates[1], record.altitude_m
     if isinstance(record, GeoFeatureRecord) and isinstance(record.geometry, Point):
         return record.geometry.coordinates[0], record.geometry.coordinates[1], None
+    return None
+
+
+def _feature_exterior_rings(record: Record) -> list[list[Position]] | None:
+    """A geo-feature's exterior area rings for the areal ``geofence_intersects`` leaf.
+
+    A ``Polygon`` contributes its exterior ring; a ``MultiPolygon`` each polygon's
+    exterior ring. Holes are intentionally excluded (the TFR adapter emits hole-free
+    areas, and the overlap test is coarse). A track, a point feature (a quake epicentre,
+    a fire pixel), or a feature with no areal geometry yields ``None`` so the leaf reports
+    unevaluable — an honest unknown, never an invented area (PRD §37)."""
+    if isinstance(record, GeoFeatureRecord):
+        geometry = record.geometry
+        if isinstance(geometry, Polygon) and geometry.coordinates:
+            return [geometry.coordinates[0]]
+        if isinstance(geometry, MultiPolygon):
+            return [poly[0] for poly in geometry.coordinates if poly]
     return None
 
 
@@ -306,14 +323,18 @@ class ContextualEvaluator:
     ) -> tuple[bool, bool]:
         """A geometry leaf's ``(level, evaluable)``.
 
-        Geometry needs a representative point — a track's position+altitude, or a
-        point geo-feature's location (an earthquake epicentre, a FIRMS pixel; M5
-        environmental alerts, USGS-FR-005). A record with no usable point (a track
-        without geometry, or a non-point feature such as a polygon TFR) makes the leaf
-        unevaluable (can't test containment/distance/elevation without a position).
+        ``geofence_intersects`` is *areal* — it works on the feature's polygon rings
+        directly, so it is handled before the point reduction (a TFR has no single
+        representative point). Every other geometry leaf needs a representative point —
+        a track's position+altitude, or a point geo-feature's location (an earthquake
+        epicentre, a FIRMS pixel; M5 environmental alerts, USGS-FR-005). A record with no
+        usable point (a track without geometry, or a point-less feature) makes those
+        leaves unevaluable (can't test containment/distance/elevation without a position).
         Each operator then dispatches to the pure :mod:`aether.alerts.geo` predicates
         against the synced geofence / station.
         """
+        if op == "geofence_intersects":
+            return self._eval_geofence_intersects(rule, record)
         point = _record_point(record)
         if point is None:
             return False, False
@@ -341,6 +362,23 @@ class ContextualEvaluator:
             return False, False
         contained = geo.geofence_contains(gf, lon, lat, alt_m)
         return (contained if op == "entered_geofence" else not contained), True
+
+    def _eval_geofence_intersects(self, rule: AlertRule, record: Record) -> tuple[bool, bool]:
+        """Areal overlap of a geo-feature's polygon with ``rule.geofence_id`` (level, evaluable).
+
+        Unevaluable when the rule names no/absent geofence (a missing fence is "unknown",
+        never "no overlap"; PRD §37) or the record has no areal geometry (a point feature
+        or a track has no polygon to overlap). Otherwise the feature's exterior rings are
+        tested against the synced fence's authoritative shape — the level is True while
+        any ring overlaps, so an ``enter`` rule fires once when an intersecting TFR first
+        appears and auto-resolves when it ages out (PRD §32 #15)."""
+        gf = self._geofences.get(rule.geofence_id) if rule.geofence_id is not None else None
+        if gf is None:
+            return False, False
+        rings = _feature_exterior_rings(record)
+        if rings is None:
+            return False, False
+        return geo.geofence_intersects_rings(gf, rings), True
 
     def _eval_distance(
         self, op: str, cond: AlertCondition, rule: AlertRule, lon: float, lat: float

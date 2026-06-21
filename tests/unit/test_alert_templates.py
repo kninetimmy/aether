@@ -59,3 +59,14 @@ def test_fire_templates_target_fire_detection_layer() -> None:
     assert nearby.subject_types == ["fire_detection"]
     # PRD §12 #13 is "within a configured radius" — distance from the station only.
     assert [c.operator for c in nearby.conditions] == ["distance_below"]
+
+
+def test_tfr_template_targets_tfr_layer_with_areal_operator() -> None:
+    tfr = {t.id: t for t in default_rule_templates(T0)}["rule-tfr-intersects-geofence"]
+    assert tfr.subject_types == ["tfr"]
+    assert tfr.transition == "enter"  # fire once when an intersecting TFR appears (PRD §32 #15)
+    cond = tfr.conditions[0]
+    assert (cond.field, cond.operator) == ("geometry", "geofence_intersects")
+    # Ships without a geofence wired — operator points it at one of their fences. With
+    # none set the rule is unevaluable and visibly never fires (no phantom overlap).
+    assert tfr.geofence_id is None
