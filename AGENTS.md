@@ -83,13 +83,16 @@ superseded by schema v2.
   and the alerts UI.
 - **M5 — Environmental layers (in progress):** USGS earthquakes (GeoJSON → earthquake features, M5.1);
   SondeHub radiosonde telemetry (REST → radiosonde tracks, M5.2); NASA FIRMS active-fire (Area-API CSV →
-  fire-detection features, capability-gated on a map key, M5.3).
+  fire-detection features, capability-gated on a map key, M5.3); earthquake alerts (geo-features drive the
+  alert engine, M5.4) + FIRMS fire-detection alert template (M5.5); NOAA GLM lightning (GOES Open-Data
+  L2/LCFA NetCDF → lightning-flash features, benchmark-gated/`netCDF4`-optional, M5.6).
 
 Every source ships a fake/replay feeder, so the full path (adapter → bus → state → websocket → UI) runs
 with tests green and no hardware (PRD §6, §34).
 
-**Next:** finish M5 — NOAA GLM lightning (§11.10, benchmark-gated, sequence last) and clustering +
-environmental alerts. **Deferred:** M5.2b (SondeHub predicted landing + descending-balloon alert,
+**Next:** finish M5 — map clustering/aggregation for dense point layers (LIGHTNING-FR-006, the last M5
+deliverable; GLM lightning landed in M5.6, benchmark verdict *acceptable* on the Pi 5, see
+`docs/glm-benchmark.md`). **Deferred:** M5.2b (SondeHub predicted landing + descending-balloon alert,
 SONDE-FR-006/007) pending verification of the live `/predictions` payload — shipping an unverified parser
 would fail *silently*, violating the fail-visibly guardrail.
 
