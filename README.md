@@ -45,9 +45,9 @@ The repo carries no secrets, callsign, or station coordinates — each operator 
 
 ## Status
 
-Milestones **M1 (COP core) → M4 (alerts & history)** are complete, and **M5 (environmental layers)** is
-nearly done — earthquakes, radiosondes, active-fire, and GLM lightning have all landed, along with
-earthquake and fire-detection alerts; the last remaining M5 item is map clustering for dense point layers.
+Milestones **M1 (COP core) → M5 (environmental layers)** are complete — earthquakes, radiosondes,
+active-fire, and GLM lightning have all landed, along with earthquake and fire-detection alerts and map
+clustering for dense point layers. Next up is **M6 (airspace & orbital)**.
 Live state is always served from memory — persistence is a sibling consumer that never gates it. Working
 today:
 
@@ -111,6 +111,30 @@ See the milestone roadmap (M0–M7) in [`CLAUDE.md`](CLAUDE.md) §4 and the exit
 
 You can run the entire COP — backend, websocket, map UI, and a simulated mix of every record type — with no
 radios and no API keys. This is the verification path; start here.
+
+### One command
+
+```bash
+git clone <repo> && cd aether
+./run.sh
+```
+
+`run.sh` is idempotent: the first run installs the Python venv and frontend, builds the UI, starts a
+loopback Mosquitto broker, and serves everything **single-origin** at `http://127.0.0.1:8000` (the backend
+serves the API, the `/ws/v2` websocket, and the built map UI from one port and one process); later runs just
+start. It needs Python ≥3.11, Node 18+, and a broker — native `mosquitto` (`sudo apt install mosquitto`,
+recommended) or Docker. Ctrl-C stops the app and any broker it started. On first run it copies
+`.env.example` → `.env` (gitignored) for your station coordinates and API keys, and starts with the demo
+source on so the map is immediately populated.
+
+Useful flags: `--rebuild`, `--reinstall`, `--with-lightning` (GLM `netCDF4` extra), `--no-open`, `--port N`,
+and `--install-service` (writes a systemd `--user` unit so aether starts on boot). Run `./run.sh --help` for
+all of them.
+
+### Manual / development setup
+
+The steps below are equivalent to `run.sh` but run each piece yourself — useful for development (Vite
+hot-reload on a separate port).
 
 **1. Backend** — needs Python 3.11+ and Docker (for the Mosquitto broker):
 

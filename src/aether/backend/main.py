@@ -14,13 +14,16 @@ Run the no-hardware demo (broker first):
 import asyncio
 import contextlib
 import logging
+import os
 import sqlite3
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import aiomqtt
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi.staticfiles import StaticFiles
 
 from aether.adapters.ais import run_ais
 from aether.adapters.aprs_is import run_aprs_is
@@ -71,6 +74,32 @@ EXPIRY_INTERVAL_S = 1.0
 #: starve the send loop or the shared event loop (PRD §37 failure isolation). A
 #: frame arriving inside the window is parsed for validity but does not re-snapshot.
 SUBSCRIBE_MIN_INTERVAL_S = 0.25
+
+
+def _mount_frontend(app: FastAPI) -> bool:
+    """Serve the built React SPA single-origin so the COP is one URL / one process.
+
+    The browser then talks to the same origin for the page, ``/api/*``, and
+    ``/ws/v2`` — matching the vite dev proxy's single-origin model (PRD §5 "bind
+    loopback"; one port keeps the Tailscale-Serve path trivial). The build dir is
+    the repo's ``frontend/dist`` unless ``AETHER_FRONTEND_DIST`` overrides it.
+
+    Mounted LAST, after every ``/api`` route and ``/ws/v2`` are registered, so the
+    catch-all static handler can never shadow them. When no production build is
+    present — the test suite, or a backend started before ``npm run build`` — this
+    mounts nothing and the app stays API-only, so the no-hardware gate (PRD §6) is
+    unaffected. Returns whether the SPA was mounted.
+    """
+    override = os.environ.get("AETHER_FRONTEND_DIST")
+    dist = Path(override) if override else Path(__file__).resolve().parents[3] / "frontend" / "dist"
+    if not (dist / "index.html").is_file():
+        log.info("frontend build not found at %s; serving API only", dist)
+        return False
+    # html=True makes ``/`` serve index.html; hashed assets resolve under their own
+    # paths. The SPA has no client-side router, so an unknown path 404ing is fine.
+    app.mount("/", StaticFiles(directory=dist, html=True), name="frontend")
+    log.info("serving frontend SPA from %s", dist)
+    return True
 
 
 def create_app(*, settings: Settings | None = None, demo_interval_s: float = 1.0) -> FastAPI:
@@ -328,6 +357,8 @@ def create_app(*, settings: Settings | None = None, demo_interval_s: float = 1.0
         finally:
             hub.unregister(conn)
 
+    # Mounted last: the static catch-all must not shadow any /api or /ws route.
+    _mount_frontend(app)
     return app
 
 
