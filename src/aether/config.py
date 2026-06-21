@@ -210,6 +210,23 @@ DEFAULT_GLM_TIMEOUT_S = 30.0
 #: carries the quality flag as an attribute (honest labeling over silent filtering).
 DEFAULT_GLM_GOOD_QUALITY_ONLY = False
 
+#: FAA Temporary Flight Restrictions (M6.1, PRD §11.13/§18.10). Off by default; opt in
+#: with ``AETHER_FAA_TFR=1``. Read-only public data — no key — so the only "gate" is
+#: politeness: the adapter polls the light list, then fetches at most
+#: ``max_details_per_poll`` detail XMLs for *new/changed* TFRs, draining a nationwide
+#: list over a few polls instead of one burst. ``AETHER_FAA_TFR_BASE_URL=fake`` selects
+#: the no-hardware feeder. ``states`` (CSV, e.g. ``FL,GA``) pre-filters the list to the
+#: operator's region to cut detail fetches; empty ⇒ all states (the AOI radius still
+#: does the real filtering after each detail is parsed).
+DEFAULT_FAA_TFR_BASE_URL = "https://tfr.faa.gov"
+#: TFRs change on the order of minutes-to-hours; a 5-minute poll keeps the map fresh
+#: while staying gentle on the FAA service.
+DEFAULT_FAA_TFR_POLL_S = 300.0
+DEFAULT_FAA_TFR_TIMEOUT_S = 15.0
+DEFAULT_FAA_TFR_RADIUS_NM = 500.0
+#: Per-poll detail-fetch budget (politeness + catch-up bound).
+DEFAULT_FAA_TFR_MAX_DETAILS_PER_POLL = 60
+
 #: Persistence store (M4, PRD §19). SQLite path; the WAL sidecars (`-wal`/`-shm`)
 #: sit alongside it. Live state never depends on this store (PRD §5), so it is off
 #: by default and a slow/failed disk only backs up the writer's own queue.
@@ -473,6 +490,20 @@ class Settings:
     glm_timeout_s: float = DEFAULT_GLM_TIMEOUT_S
     glm_good_quality_only: bool = DEFAULT_GLM_GOOD_QUALITY_ONLY
 
+    #: FAA TFR airspace overlay (M6.1, PRD §11.13/§18.10). Off by default — opt in with
+    #: ``AETHER_FAA_TFR=1``. Read-only public data (no key); ``faa_tfr_base_url=fake``
+    #: selects the no-hardware feeder. ``faa_tfr_states`` (CSV) optionally pre-filters the
+    #: nationwide list to the operator's region; the AOI center defaults to the station.
+    faa_tfr: bool = False
+    faa_tfr_base_url: str = DEFAULT_FAA_TFR_BASE_URL
+    faa_tfr_center_lat: float = DEFAULT_STATION_LAT
+    faa_tfr_center_lon: float = DEFAULT_STATION_LON
+    faa_tfr_radius_nm: float = DEFAULT_FAA_TFR_RADIUS_NM
+    faa_tfr_poll_s: float = DEFAULT_FAA_TFR_POLL_S
+    faa_tfr_timeout_s: float = DEFAULT_FAA_TFR_TIMEOUT_S
+    faa_tfr_max_details_per_poll: int = DEFAULT_FAA_TFR_MAX_DETAILS_PER_POLL
+    faa_tfr_states: tuple[str, ...] = ()
+
     #: Persist fused records to SQLite (M4, PRD §19). Off by default — persistence
     #: is a *sibling* bus consumer that never gates serving live state (PRD §5).
     #: Track history is the first consumer; retention/alerts/replay build on the same
@@ -689,6 +720,27 @@ class Settings:
             glm_timeout_s=float(os.environ.get("AETHER_GLM_TIMEOUT_S", DEFAULT_GLM_TIMEOUT_S)),
             glm_good_quality_only=_env_bool(
                 "AETHER_GLM_GOOD_QUALITY_ONLY", DEFAULT_GLM_GOOD_QUALITY_ONLY
+            ),
+            faa_tfr=_env_bool("AETHER_FAA_TFR", False),
+            faa_tfr_base_url=os.environ.get("AETHER_FAA_TFR_BASE_URL", DEFAULT_FAA_TFR_BASE_URL),
+            faa_tfr_center_lat=float(os.environ.get("AETHER_FAA_TFR_LAT", station_lat)),
+            faa_tfr_center_lon=float(os.environ.get("AETHER_FAA_TFR_LON", station_lon)),
+            faa_tfr_radius_nm=float(
+                os.environ.get("AETHER_FAA_TFR_RADIUS_NM", DEFAULT_FAA_TFR_RADIUS_NM)
+            ),
+            faa_tfr_poll_s=float(os.environ.get("AETHER_FAA_TFR_POLL_S", DEFAULT_FAA_TFR_POLL_S)),
+            faa_tfr_timeout_s=float(
+                os.environ.get("AETHER_FAA_TFR_TIMEOUT_S", DEFAULT_FAA_TFR_TIMEOUT_S)
+            ),
+            faa_tfr_max_details_per_poll=int(
+                os.environ.get(
+                    "AETHER_FAA_TFR_MAX_DETAILS_PER_POLL", DEFAULT_FAA_TFR_MAX_DETAILS_PER_POLL
+                )
+            ),
+            faa_tfr_states=tuple(
+                s.strip().upper()
+                for s in os.environ.get("AETHER_FAA_TFR_STATES", "").split(",")
+                if s.strip()
             ),
             persist=_env_bool("AETHER_PERSIST", False),
             db_path=os.environ.get("AETHER_DB_PATH", DEFAULT_DB_PATH),

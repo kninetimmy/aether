@@ -59,8 +59,8 @@ local-only with one filter. Full vision and requirements: **`PRD.md`**.
 
 ## 3. Current status
 
-Built and verified — milestones **M1 (COP core) → M4 (alerts & history)** are complete (PRD §32 exit
-criteria met); **M5 (environmental layers)** is in progress. SQLite persistence landed in M4 as a sibling
+Built and verified — milestones **M1 (COP core) → M5 (environmental layers)** are complete (PRD §32 exit
+criteria met); **M6 (airspace & orbital)** is in progress. SQLite persistence landed in M4 as a sibling
 bus consumer that never gates serving live state (§5). The v1 `Entity`/`Event` skeleton has been
 superseded by schema v2.
 
@@ -81,18 +81,26 @@ superseded by schema v2.
   engine (contextual operators: geofence/distance/elevation/count/changed) with ack/resolve + `/test`,
   notification dispatch (dashboard/browser/SMTP/Discord), replay timeline (replay can't fire live alerts),
   and the alerts UI.
-- **M5 — Environmental layers (in progress):** USGS earthquakes (GeoJSON → earthquake features, M5.1);
+- **M5 — Environmental layers:** USGS earthquakes (GeoJSON → earthquake features, M5.1);
   SondeHub radiosonde telemetry (REST → radiosonde tracks, M5.2); NASA FIRMS active-fire (Area-API CSV →
   fire-detection features, capability-gated on a map key, M5.3); earthquake alerts (geo-features drive the
   alert engine, M5.4) + FIRMS fire-detection alert template (M5.5); NOAA GLM lightning (GOES Open-Data
-  L2/LCFA NetCDF → lightning-flash features, benchmark-gated/`netCDF4`-optional, M5.6).
+  L2/LCFA NetCDF → lightning-flash features, benchmark-gated/`netCDF4`-optional, M5.6); client-side map
+  clustering for dense point layers (LIGHTNING-FR-006, M5.7).
+- **M6 — Airspace & orbital (in progress):** FAA TFR adapter (`faa_tfr.py`, M6.1) — two-step poll of the
+  official service (`tfrapi/exportTfrList` JSON list → `download/detail_<n>.xml` `<XNOTAM-Update>` detail),
+  decimal-deg/hemisphere coords + local-`codeTimeZone`→UTC times, `abdMergedArea` vertices → `Polygon`/
+  `MultiPolygon` `GeoFeatureRecord`s (`feature_type="tfr"`), AOI filter + revision dedupe + bounded
+  detail-fetch budget + optional `states` pre-filter; unparseable geometry → a textual `EventRecord`
+  (never an invented shape, §18.10); FAA attribution + "not a flight-planning product" caveat.
 
 Every source ships a fake/replay feeder, so the full path (adapter → bus → state → websocket → UI) runs
 with tests green and no hardware (PRD §6, §34).
 
-**Next:** finish M5 — map clustering/aggregation for dense point layers (LIGHTNING-FR-006, the last M5
-deliverable; GLM lightning landed in M5.6, benchmark verdict *acceptable* on the Pi 5, see
-`docs/glm-benchmark.md`). **Deferred:** M5.2b (SondeHub predicted landing + descending-balloon alert,
+**Next:** continue M6 — FAA NOTAM (capability-gated, §18.11) and/or CelesTrak GP sync + SGP4 propagation +
+pass prediction (§18.12, §11.14). **SGP4/orbital is ultracode-gated** (maintainer approval before any
+multi-agent run). A natural M6 follow-up to M6.1 is TFR-into-geofence / TFR-becomes-active alerts (PRD §32
+triggers #15/#16). **Deferred:** M5.2b (SondeHub predicted landing + descending-balloon alert,
 SONDE-FR-006/007) pending verification of the live `/predictions` payload — shipping an unverified parser
 would fail *silently*, violating the fail-visibly guardrail.
 
