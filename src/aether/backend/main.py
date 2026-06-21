@@ -27,6 +27,7 @@ from aether.adapters.aprs_is import run_aprs_is
 from aether.adapters.local_adsb import run_local_adsb
 from aether.adapters.local_aprs import run_local_aprs
 from aether.adapters.network_adsb import run_network_adsb
+from aether.adapters.usgs import run_usgs
 from aether.alerts.engine import AlertEngine
 from aether.alerts.notify import (
     ChannelThresholds,
@@ -143,6 +144,8 @@ def create_app(*, settings: Settings | None = None, demo_interval_s: float = 1.0
             tasks.append(asyncio.create_task(run_aprs_is(cfg, ready)))
         if cfg.ais:
             tasks.append(asyncio.create_task(run_ais(cfg, ready)))
+        if cfg.usgs:
+            tasks.append(asyncio.create_task(run_usgs(cfg, ready)))
         if cfg.persist:
             # Ensure the schema exists *before* the sibling tasks and the seed run:
             # a short opener applies migrations idempotently (the writer below reopens
