@@ -160,6 +160,31 @@ DEFAULT_SONDEHUB_RADIUS_NM = 500.0
 #: landed/expired flights (SONDE-FR-004). One hour covers an active ascent+descent.
 DEFAULT_SONDEHUB_RECENCY_S = 3600.0
 
+#: NASA FIRMS active-fire feed (M5.3, PRD §11.11). Capability-gated: the Area API
+#: needs a user-supplied **map key** (``AETHER_FIRMS_MAP_KEY``) — without it the adapter
+#: degrades *visibly* (an ``offline`` source status), never crashes (FIRMS-FR-001). The
+#: default base is the public FIRMS host; the adapter appends
+#: ``/api/area/csv/<key>/<source>/<w,s,e,n>/<day_range>`` for the AOI bounding box
+#: (FIRMS-FR-002). Near-real-time VIIRS (Suomi-NPP) is the default source, configurable
+#: to any FIRMS source (FIRMS-FR-003). ``fake``/``demo`` (as base *or* key) selects the
+#: no-hardware feeder. Detections outside the AOI radius or below ``min_confidence`` are
+#: dropped at the adapter edge.
+DEFAULT_FIRMS_API_BASE = "https://firms.modaps.eosdis.nasa.gov"
+#: Near-real-time VIIRS by default (FIRMS-FR-003); operators may select
+#: ``VIIRS_NOAA20_NRT`` / ``VIIRS_NOAA21_NRT`` / ``MODIS_NRT`` / ``LANDSAT_NRT`` etc.
+DEFAULT_FIRMS_SOURCE = "VIIRS_SNPP_NRT"
+#: Area-API look-back window in days (the endpoint accepts 1..5). One day of detections
+#: is ample for a live COP and keeps each query small (FIRMS-FR-007 transaction limits).
+DEFAULT_FIRMS_DAY_RANGE = 1
+#: FIRMS NRT latency is hours and the feed updates only a few times a day; a 15-minute
+#: poll keeps the map fresh while staying far under the 5000-tx/10-min limit (FIRMS-FR-007).
+DEFAULT_FIRMS_POLL_S = 900.0
+DEFAULT_FIRMS_TIMEOUT_S = 15.0
+DEFAULT_FIRMS_RADIUS_NM = 500.0
+#: Minimum detection confidence class to keep: "" (none) / "low" / "nominal" / "high".
+#: Empty ⇒ show every detection in the AOI; honest labeling carries the class regardless.
+DEFAULT_FIRMS_MIN_CONFIDENCE = ""
+
 #: Persistence store (M4, PRD §19). SQLite path; the WAL sidecars (`-wal`/`-shm`)
 #: sit alongside it. Live state never depends on this store (PRD §5), so it is off
 #: by default and a slow/failed disk only backs up the writer's own queue.
@@ -388,6 +413,23 @@ class Settings:
     sondehub_poll_s: float = DEFAULT_SONDEHUB_POLL_S
     sondehub_timeout_s: float = DEFAULT_SONDEHUB_TIMEOUT_S
 
+    #: Run the NASA FIRMS active-fire adapter alongside the backend (M5.3, PRD §11.11). Off
+    #: by default — opt in with ``AETHER_FIRMS=1``. Capability-gated on a map key
+    #: (``firms_map_key``); a missing key degrades to an ``offline`` status, never a crash.
+    #: The AOI center defaults to the station; ``firms_api_base=fake`` (or ``firms_map_key=fake``)
+    #: selects the no-hardware feeder.
+    firms: bool = False
+    firms_map_key: str = ""
+    firms_api_base: str = DEFAULT_FIRMS_API_BASE
+    firms_source: str = DEFAULT_FIRMS_SOURCE
+    firms_day_range: int = DEFAULT_FIRMS_DAY_RANGE
+    firms_center_lat: float = DEFAULT_STATION_LAT
+    firms_center_lon: float = DEFAULT_STATION_LON
+    firms_radius_nm: float = DEFAULT_FIRMS_RADIUS_NM
+    firms_min_confidence: str = DEFAULT_FIRMS_MIN_CONFIDENCE
+    firms_poll_s: float = DEFAULT_FIRMS_POLL_S
+    firms_timeout_s: float = DEFAULT_FIRMS_TIMEOUT_S
+
     #: Persist fused records to SQLite (M4, PRD §19). Off by default — persistence
     #: is a *sibling* bus consumer that never gates serving live state (PRD §5).
     #: Track history is the first consumer; retention/alerts/replay build on the same
@@ -570,6 +612,23 @@ class Settings:
             ),
             sondehub_timeout_s=float(
                 os.environ.get("AETHER_SONDEHUB_TIMEOUT_S", DEFAULT_SONDEHUB_TIMEOUT_S)
+            ),
+            firms=_env_bool("AETHER_FIRMS", False),
+            firms_map_key=os.environ.get("AETHER_FIRMS_MAP_KEY", ""),
+            firms_api_base=os.environ.get("AETHER_FIRMS_API_BASE", DEFAULT_FIRMS_API_BASE),
+            firms_source=os.environ.get("AETHER_FIRMS_SOURCE", DEFAULT_FIRMS_SOURCE),
+            firms_day_range=int(os.environ.get("AETHER_FIRMS_DAY_RANGE", DEFAULT_FIRMS_DAY_RANGE)),
+            firms_center_lat=float(os.environ.get("AETHER_FIRMS_LAT", station_lat)),
+            firms_center_lon=float(os.environ.get("AETHER_FIRMS_LON", station_lon)),
+            firms_radius_nm=float(
+                os.environ.get("AETHER_FIRMS_RADIUS_NM", DEFAULT_FIRMS_RADIUS_NM)
+            ),
+            firms_min_confidence=os.environ.get(
+                "AETHER_FIRMS_MIN_CONFIDENCE", DEFAULT_FIRMS_MIN_CONFIDENCE
+            ),
+            firms_poll_s=float(os.environ.get("AETHER_FIRMS_POLL_S", DEFAULT_FIRMS_POLL_S)),
+            firms_timeout_s=float(
+                os.environ.get("AETHER_FIRMS_TIMEOUT_S", DEFAULT_FIRMS_TIMEOUT_S)
             ),
             persist=_env_bool("AETHER_PERSIST", False),
             db_path=os.environ.get("AETHER_DB_PATH", DEFAULT_DB_PATH),
