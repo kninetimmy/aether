@@ -59,9 +59,10 @@ local-only with one filter. Full vision and requirements: **`PRD.md`**.
 
 ## 3. Current status
 
-Built and verified — milestones **M1 (COP core) → M3 (network fusion)** are complete (PRD §32 exit
-criteria met). Live state is **in-memory only**; SQLite persistence lands in M4. The v1 `Entity`/`Event`
-skeleton has been superseded by schema v2.
+Built and verified — milestones **M1 (COP core) → M4 (alerts & history)** are complete (PRD §32 exit
+criteria met); **M5 (environmental layers)** is in progress. SQLite persistence landed in M4 as a sibling
+bus consumer that never gates serving live state (§5). The v1 `Entity`/`Event` skeleton has been
+superseded by schema v2.
 
 - **Schema v2** (PRD §14): the discriminated record union — track / geo-feature / event / alert /
   source-status — with provenance, `correlation_key`, and observed/received/published timestamps.
@@ -75,12 +76,22 @@ skeleton has been superseded by schema v2.
   (AISStream); the fusion engine (local + Internet observations of one identity collapse into a single
   track by strict identity key, with source precedence and freshness/expiry); military Mode-S
   classification (provider bit + operator-supplied ICAO blocks); UI display filters + TOI watchlist.
+- **M4 — Alerts & history:** SQLite WAL + migrations with their consumers — retention manager (disk
+  limits), persist-cadence sampling, track-history read API, geofence CRUD, alert-rule CRUD + stateful
+  engine (contextual operators: geofence/distance/elevation/count/changed) with ack/resolve + `/test`,
+  notification dispatch (dashboard/browser/SMTP/Discord), replay timeline (replay can't fire live alerts),
+  and the alerts UI.
+- **M5 — Environmental layers (in progress):** USGS earthquakes (GeoJSON → earthquake features, M5.1);
+  SondeHub radiosonde telemetry (REST → radiosonde tracks, M5.2); NASA FIRMS active-fire (Area-API CSV →
+  fire-detection features, capability-gated on a map key, M5.3).
 
 Every source ships a fake/replay feeder, so the full path (adapter → bus → state → websocket → UI) runs
 with tests green and no hardware (PRD §6, §34).
 
-**Next:** M4 — SQLite WAL + migrations introduced **with** their consumers (alert-rule engine, track
-history, replay, geofences). Persistence is new ground here; it must never gate serving live state (§5).
+**Next:** finish M5 — NOAA GLM lightning (§11.10, benchmark-gated, sequence last) and clustering +
+environmental alerts. **Deferred:** M5.2b (SondeHub predicted landing + descending-balloon alert,
+SONDE-FR-006/007) pending verification of the live `/predictions` payload — shipping an unverified parser
+would fail *silently*, violating the fail-visibly guardrail.
 
 ---
 

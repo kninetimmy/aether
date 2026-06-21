@@ -24,6 +24,7 @@ from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnec
 
 from aether.adapters.ais import run_ais
 from aether.adapters.aprs_is import run_aprs_is
+from aether.adapters.firms import run_firms
 from aether.adapters.local_adsb import run_local_adsb
 from aether.adapters.local_aprs import run_local_aprs
 from aether.adapters.network_adsb import run_network_adsb
@@ -149,6 +150,8 @@ def create_app(*, settings: Settings | None = None, demo_interval_s: float = 1.0
             tasks.append(asyncio.create_task(run_usgs(cfg, ready)))
         if cfg.sondehub:
             tasks.append(asyncio.create_task(run_sondehub(cfg, ready)))
+        if cfg.firms:
+            tasks.append(asyncio.create_task(run_firms(cfg, ready)))
         if cfg.persist:
             # Ensure the schema exists *before* the sibling tasks and the seed run:
             # a short opener applies migrations idempotently (the writer below reopens
