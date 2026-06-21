@@ -54,6 +54,7 @@ ConditionOperator = Literal[
     "not_exists",
     "entered_geofence",
     "exited_geofence",
+    "geofence_intersects",
     "source_stale",
     "source_offline",
     "count_within_window",

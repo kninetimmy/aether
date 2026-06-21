@@ -20,7 +20,7 @@ from aether.alerts.contextual import ContextualEvaluator, StationRef
 from aether.alerts.engine import AlertEngine
 from aether.schema.alert_rule import AlertCondition, AlertRule, AlertRuleCreate
 from aether.schema.geofence import CircleShape, Geofence, GeofenceCreate
-from aether.schema.geometry import Point
+from aether.schema.geometry import MultiPolygon, Point, Polygon
 from aether.schema.records import EventRecord, GeoFeatureRecord, Record, TrackRecord
 from aether.state.live import StateChange
 
@@ -132,6 +132,28 @@ def _quake(
     )
 
 
+def _box_ring(west: float, south: float, east: float, north: float) -> list[list[float]]:
+    return [[west, south], [east, south], [east, north], [west, north], [west, south]]
+
+
+def _tfr(
+    geometry: Polygon | MultiPolygon,
+    *,
+    id: str = "tfr:faa:6_9513",
+) -> GeoFeatureRecord:
+    return GeoFeatureRecord(
+        id=id,
+        source="faa_tfr",
+        observed_at=T0,
+        received_at=T0,
+        published_at=T0,
+        correlation_key=id,
+        feature_type="tfr",
+        geometry=geometry,
+        label="Test TFR",
+    )
+
+
 def _change(record: Record, *, op: str | None = None) -> StateChange:
     if isinstance(record, TrackRecord):
         kind, op = "track", op or "upsert"
@@ -195,6 +217,84 @@ def test_exited_geofence_fires_when_track_leaves() -> None:
     # Outside → exited level True → fires.
     out = engine.evaluate(_change(_track(-90.0, 40.0)))
     assert len(out) == 1 and out[0].state == "open"
+
+
+# --- areal TFR intersection (geofence_intersects, PRD §32 #15) ----------------
+
+
+def _tfr_rule(*, geofence_id: str | None = "gf-ring") -> AlertRule:
+    return _rule(
+        subject_types=["tfr"],
+        conditions=[AlertCondition(field="geometry", operator="geofence_intersects")],
+        geofence_id=geofence_id,
+        transition="enter",
+    )
+
+
+def test_geofence_intersects_tfr_fires_once_and_auto_resolves() -> None:
+    clock = _Clock(T0)
+    engine = _engine(clock, [_tfr_rule()], geofences=[_circle()])  # circle at (-95, 40)
+    tfr = _tfr(Polygon(coordinates=[_box_ring(-95.2, 39.9, -94.8, 40.1)]))  # straddles the fence
+
+    out = engine.evaluate(_change(tfr))
+    assert len(out) == 1 and out[0].state == "open"
+    # A revision re-publish (same id, still overlapping) dedups against the open alert.
+    assert engine.evaluate(_change(tfr)) == []
+
+    # The TFR ages out of live state → feature remove → the open alert auto-resolves.
+    clock.t = T0 + timedelta(minutes=5)
+    resolved = engine.evaluate(
+        StateChange(seq=2, op="remove", kind="feature", id=tfr.id, record=None)
+    )
+    assert len(resolved) == 1 and resolved[0].state == "resolved"
+
+
+def test_geofence_intersects_disjoint_tfr_does_not_fire() -> None:
+    clock = _Clock(T0)
+    engine = _engine(clock, [_tfr_rule()], geofences=[_circle()])
+    far = _tfr(Polygon(coordinates=[_box_ring(-80.2, 39.9, -79.8, 40.1)]))  # ~1150 km east
+    assert engine.evaluate(_change(far)) == []
+
+
+def test_geofence_intersects_multipolygon_one_area_overlaps() -> None:
+    clock = _Clock(T0)
+    engine = _engine(clock, [_tfr_rule()], geofences=[_circle()])
+    # One area far away, one straddling the fence — the rule fires on the overlapping area.
+    geom = MultiPolygon(
+        coordinates=[
+            [_box_ring(-80.2, 39.9, -79.8, 40.1)],
+            [_box_ring(-95.2, 39.9, -94.8, 40.1)],
+        ]
+    )
+    out = engine.evaluate(_change(_tfr(geom)))
+    assert len(out) == 1 and out[0].state == "open"
+
+
+def test_geofence_intersects_unevaluable_without_geofence() -> None:
+    # An overlapping TFR but the rule names no (or an absent) geofence → unevaluable, so
+    # the engine does nothing — never a phantom overlap against a missing fence (PRD §37).
+    clock = _Clock(T0)
+    overlapping = _tfr(Polygon(coordinates=[_box_ring(-95.2, 39.9, -94.8, 40.1)]))
+
+    no_fence = _engine(clock, [_tfr_rule(geofence_id=None)], geofences=[_circle()])
+    assert no_fence.evaluate(_change(overlapping)) == []
+
+    absent = _engine(clock, [_tfr_rule(geofence_id="gf-missing")], geofences=[_circle()])
+    assert absent.evaluate(_change(overlapping)) == []
+
+
+def test_geofence_intersects_unevaluable_for_point_feature() -> None:
+    # geofence_intersects is areal: a point feature (a quake) has no polygon, so the leaf
+    # is an honest unknown (no fire), not a False that would masquerade as "no overlap".
+    clock = _Clock(T0)
+    rule = _rule(
+        subject_types=["earthquake"],
+        conditions=[AlertCondition(field="geometry", operator="geofence_intersects")],
+        geofence_id="gf-ring",
+        transition="enter",
+    )
+    engine = _engine(clock, [rule], geofences=[_circle()])
+    assert engine.evaluate(_change(_quake(STATION_LON, STATION_LAT))) == []  # on the fence center
 
 
 # --- distance -----------------------------------------------------------------

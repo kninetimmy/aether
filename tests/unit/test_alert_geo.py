@@ -93,6 +93,82 @@ def test_empty_polygon_is_outside() -> None:
     assert not geo.point_in_polygon(0.0, 0.0, Polygon(coordinates=[]))
 
 
+# --- areal intersection (geofence_intersects) ---------------------------------
+
+
+def _ring(*corners: tuple[float, float]) -> list[list[float]]:
+    return [[c[0], c[1]] for c in corners]
+
+
+def test_rings_intersect_overlapping_boxes() -> None:
+    a = _ring((-96.0, 40.0), (-94.0, 40.0), (-94.0, 42.0), (-96.0, 42.0))
+    b = _ring((-95.0, 41.0), (-93.0, 41.0), (-93.0, 43.0), (-95.0, 43.0))  # overlaps NE corner
+    assert geo.rings_intersect(a, b)
+    assert geo.rings_intersect(b, a)  # symmetric
+
+
+def test_rings_intersect_disjoint_boxes() -> None:
+    a = _ring((-96.0, 40.0), (-95.0, 40.0), (-95.0, 41.0), (-96.0, 41.0))
+    b = _ring((-90.0, 40.0), (-89.0, 40.0), (-89.0, 41.0), (-90.0, 41.0))  # far east
+    assert not geo.rings_intersect(a, b)
+
+
+def test_rings_intersect_one_fully_inside_other() -> None:
+    outer = _ring((-96.0, 40.0), (-94.0, 40.0), (-94.0, 42.0), (-96.0, 42.0))
+    inner = _ring((-95.5, 40.5), (-94.5, 40.5), (-94.5, 41.5), (-95.5, 41.5))  # no edge crossing
+    assert geo.rings_intersect(outer, inner)  # inner vertex inside outer
+    assert geo.rings_intersect(inner, outer)  # outer "contains" inner — symmetric
+
+
+def test_rings_intersect_degenerate_ring_is_false() -> None:
+    a = _ring((-96.0, 40.0), (-94.0, 40.0), (-94.0, 42.0), (-96.0, 42.0))
+    assert not geo.rings_intersect(a, [[-95.0, 41.0], [-94.0, 41.0]])  # < 3 vertices
+
+
+def test_ring_intersects_circle_center_inside_ring() -> None:
+    # A big polygon enclosing the circle's center → overlap even though no vertex is near.
+    ring = _ring((-96.0, 39.0), (-94.0, 39.0), (-94.0, 41.0), (-96.0, 41.0))
+    assert geo.ring_intersects_circle(ring, [-95.0, 40.0], 1000.0)
+
+
+def test_ring_intersects_circle_edge_within_radius() -> None:
+    # Circle center just outside the box, but within radius of the nearest edge.
+    ring = _ring((-95.0, 40.0), (-94.0, 40.0), (-94.0, 41.0), (-95.0, 41.0))
+    near = [-95.0 - math.degrees(3000.0 / _EARTH_RADIUS_M), 40.5]  # ~3 km west of left edge
+    assert geo.ring_intersects_circle(ring, near, 5000.0)  # edge within 5 km
+    assert not geo.ring_intersects_circle(ring, near, 1000.0)  # edge beyond 1 km
+
+
+def test_geofence_intersects_rings_circle_and_polygon_shapes() -> None:
+    tfr_ring = _ring((-95.2, 39.9), (-94.8, 39.9), (-94.8, 40.1), (-95.2, 40.1))  # around station
+
+    circle = Geofence.create(
+        GeofenceCreate(name="c", shape=CircleShape(center=[-95.0, 40.0], radius_m=5000.0)),
+        id="gf-c",
+        now=T0,
+    )
+    assert geo.geofence_intersects_rings(circle, [tfr_ring])
+
+    poly = Geofence.create(
+        GeofenceCreate(
+            name="p",
+            shape=PolygonShape(
+                polygon={"coordinates": [_ring((-95.1, 40.0), (-94.0, 40.0), (-94.0, 41.0))]}
+            ),
+        ),
+        id="gf-p",
+        now=T0,
+    )
+    assert geo.geofence_intersects_rings(poly, [tfr_ring])  # overlaps the TFR's east side
+
+    far = Geofence.create(
+        GeofenceCreate(name="f", shape=CircleShape(center=[-80.0, 40.0], radius_m=5000.0)),
+        id="gf-f",
+        now=T0,
+    )
+    assert not geo.geofence_intersects_rings(far, [tfr_ring])
+
+
 # --- altitude band ------------------------------------------------------------
 
 

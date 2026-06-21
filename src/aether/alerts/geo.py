@@ -33,6 +33,22 @@ def haversine_m(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
     return 2.0 * _EARTH_RADIUS_M * math.asin(math.sqrt(a))
 
 
+def _unwrap_lon(lon: float, anchor: float) -> float:
+    """Shift ``lon`` to within 180 deg of ``anchor`` (antimeridian-safe longitude frame).
+
+    Anchoring lets an edge spanning +-180 (or a fence written with >180 longitudes) be
+    tested against a contiguous longitude axis rather than wrapping the wrong way. Shared
+    by the ray cast and the areal intersection predicates so both put two rings in one
+    frame the same way.
+    """
+    delta = lon - anchor
+    if delta > 180.0:
+        return lon - 360.0
+    if delta < -180.0:
+        return lon + 360.0
+    return lon
+
+
 def point_in_ring(lon: float, lat: float, ring: list[Position]) -> bool:
     """Even-odd ray cast for ONE ring, antimeridian-aware, boundary = inside.
 
@@ -53,15 +69,7 @@ def point_in_ring(lon: float, lat: float, ring: list[Position]) -> bool:
     anchor = ring[0][0]
 
     def _unwrap(vlon: float) -> float:
-        # Shift a longitude to within 180 deg of the ring anchor so an edge spanning
-        # the antimeridian (or a fence written with >180 longitudes) tests against a
-        # contiguous longitude axis rather than wrapping the wrong way.
-        delta = vlon - anchor
-        if delta > 180.0:
-            return vlon - 360.0
-        if delta < -180.0:
-            return vlon + 360.0
-        return vlon
+        return _unwrap_lon(vlon, anchor)
 
     x = _unwrap(lon)  # the test point, into the ring's frame
     inside = False
@@ -114,6 +122,131 @@ def point_in_polygon(lon: float, lat: float, polygon: Polygon) -> bool:
 def point_in_circle(lon: float, lat: float, center: Position, radius_m: float) -> bool:
     """True haversine containment: haversine_m(point, center) <= radius_m (inclusive)."""
     return haversine_m(lon, lat, center[0], center[1]) <= radius_m
+
+
+# --- areal intersection (a feature's polygon vs a geofence; geofence_intersects) ----
+# The first AREAL operator: earlier geometry leaves reduce a record to a representative
+# POINT, but a TFR is a polygon, so "does this area overlap the fence" needs ring math.
+# Spherical-Earth planar approximations on the unwrapped longitude frame, adequate at
+# the <=500 NM home-station AOI (the same regime as the containment predicates above).
+
+
+def _orient(ax: float, ay: float, bx: float, by: float, cx: float, cy: float) -> float:
+    """Signed twice-area of triangle (a, b, c): >0 if c is left of a->b, <0 right, 0 collinear."""
+    return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+
+
+def _segments_cross(a1: Position, a2: Position, b1: Position, b2: Position) -> bool:
+    """Whether segment ``a1-a2`` intersects ``b1-b2`` (planar, endpoints/touching count).
+
+    Standard orientation test: a proper crossing flips both pairs of orientations; the
+    four collinear cases (an endpoint lying on the other segment) are caught via the
+    bounding-box :func:`_on_segment` check so a TFR edge merely grazing the fence still
+    reads as intersecting. Operates in whatever longitude frame the caller unwraps into.
+    """
+    ax, ay, bx, by = a1[0], a1[1], a2[0], a2[1]
+    cx, cy, dx, dy = b1[0], b1[1], b2[0], b2[1]
+    d1 = _orient(cx, cy, dx, dy, ax, ay)
+    d2 = _orient(cx, cy, dx, dy, bx, by)
+    d3 = _orient(ax, ay, bx, by, cx, cy)
+    d4 = _orient(ax, ay, bx, by, dx, dy)
+    if ((d1 > 0.0) != (d2 > 0.0)) and ((d3 > 0.0) != (d4 > 0.0)):
+        return True
+    if d1 == 0.0 and _on_segment(ax, ay, cx, cy, dx, dy):
+        return True
+    if d2 == 0.0 and _on_segment(bx, by, cx, cy, dx, dy):
+        return True
+    if d3 == 0.0 and _on_segment(cx, cy, ax, ay, bx, by):
+        return True
+    if d4 == 0.0 and _on_segment(dx, dy, ax, ay, bx, by):
+        return True
+    return False
+
+
+def rings_intersect(ring_a: list[Position], ring_b: list[Position]) -> bool:
+    """Whether two closed rings overlap: any edges cross, OR one fully contains the other.
+
+    Both rings are unwrapped into ``ring_a``'s anchor frame so a seam-straddling pair is
+    compared on one contiguous axis. An edge crossing is a clear overlap; with no
+    crossing the rings are either nested (one vertex of each tested for containment in
+    the other via :func:`point_in_ring`) or disjoint. A ring with < 3 vertices is
+    degenerate and never intersects. Holes are not considered — callers pass exterior
+    rings (a coarse overlap test, matching the polygon reference-point convention)."""
+    n, m = len(ring_a), len(ring_b)
+    if n < 3 or m < 3:
+        return False
+    anchor = ring_a[0][0]
+    a: list[Position] = [[_unwrap_lon(p[0], anchor), p[1]] for p in ring_a]
+    b: list[Position] = [[_unwrap_lon(p[0], anchor), p[1]] for p in ring_b]
+    for i in range(n):
+        a1, a2 = a[i], a[(i + 1) % n]
+        for j in range(m):
+            if _segments_cross(a1, a2, b[j], b[(j + 1) % m]):
+                return True
+    # No edge crossing → nested or disjoint. point_in_ring re-anchors on its own ring,
+    # so pass the ORIGINAL (not pre-unwrapped) vertices to keep its frame self-consistent.
+    if point_in_ring(ring_a[0][0], ring_a[0][1], ring_b):
+        return True
+    return point_in_ring(ring_b[0][0], ring_b[0][1], ring_a)
+
+
+def _segment_point_distance_m(clon: float, clat: float, a: Position, b: Position) -> float:
+    """Shortest distance (metres) from ``(clon, clat)`` to segment ``a-b``.
+
+    Projects to a local equirectangular frame (longitude scaled by cos(lat) at the
+    point, so east-west distances aren't overstated), clamps the closest-point parameter
+    to the segment, then measures the haversine to that closest point — keeping the
+    returned distance in true metres while the parametrisation stays cheap and planar.
+    """
+    cx = clon
+    ax = _unwrap_lon(a[0], clon)
+    bx = _unwrap_lon(b[0], clon)
+    ay, by = a[1], b[1]
+    kx = math.cos(math.radians(clat))
+    ux, uy = (bx - ax) * kx, by - ay
+    wx, wy = (cx - ax) * kx, clat - ay
+    seg2 = ux * ux + uy * uy
+    t = 0.0 if seg2 == 0.0 else max(0.0, min(1.0, (wx * ux + wy * uy) / seg2))
+    px, py = ax + t * (bx - ax), ay + t * (by - ay)
+    return haversine_m(clon, clat, px, py)
+
+
+def ring_intersects_circle(ring: list[Position], center: Position, radius_m: float) -> bool:
+    """Whether a ring overlaps a circle: center inside the ring, OR an edge within radius.
+
+    Covers every overlap case — circle inside the polygon (center contained), polygon
+    inside or straddling the circle (some edge passes within ``radius_m`` of the center,
+    which subsumes a vertex falling inside the circle). A degenerate ring never overlaps."""
+    if len(ring) < 3:
+        return False
+    clon, clat = center[0], center[1]
+    if point_in_ring(clon, clat, ring):
+        return True
+    n = len(ring)
+    return any(
+        _segment_point_distance_m(clon, clat, ring[i], ring[(i + 1) % n]) <= radius_m
+        for i in range(n)
+    )
+
+
+def geofence_intersects_rings(gf: Geofence, rings: list[list[Position]]) -> bool:
+    """Whether any of a feature's exterior rings overlaps the geofence's authoritative shape.
+
+    Horizontal-only overlap (a TFR polygon vs the fence): the geofence altitude band and
+    any polygon holes are NOT applied — a TFR carries its own vertical limits as text, not
+    a single altitude, so areal overlap is the honest signal (the vertical refinement can
+    come later). A ``CircleShape`` uses its authoritative center+radius; a ``PolygonShape``
+    its exterior ring."""
+    shape = gf.shape
+    for ring in rings:
+        if isinstance(shape, CircleShape):
+            if ring_intersects_circle(ring, shape.center, shape.radius_m):
+                return True
+        else:
+            exterior = shape.polygon.coordinates[0] if shape.polygon.coordinates else []
+            if rings_intersect(ring, exterior):
+                return True
+    return False
 
 
 def in_altitude_band(alt_m: float | None, min_m: float | None, max_m: float | None) -> bool:

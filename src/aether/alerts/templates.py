@@ -16,8 +16,9 @@ defined yet:
 - geofence enter/exit/altitude (#6, #7), watchlist aircraft (#5): the alert engine
   slice (geofence containment + watchlist matching).
 - APRS emergency/message (#8, #10), AIS (#22, #23): with their detail semantics.
-- lightning/TFR/satellite/balloon (#11/#12, #15–#21): the M5/M6 slice that lands each
-  source (earthquakes #14 and FIRMS detections #13 are done; the rest seed with theirs).
+- lightning/satellite/balloon (#11/#12, #17–#21): the M5/M6 slice that lands each
+  source (earthquakes #14, FIRMS detections #13, and TFR-intersects-geofence #15 are
+  done; TFR-becomes-active #16 and the rest seed with theirs).
 - disk-budget/time-sync (#25, #26): with the system-event sources that raise them.
 
 Templates are defined as ``(id, AlertRuleCreate)`` pairs and stamped with ``now``
@@ -185,6 +186,33 @@ _TEMPLATES: tuple[tuple[str, AlertRuleCreate], ...] = (
                 "NASA FIRMS reports an active-fire detection within ~27 NM of the home "
                 "station. Requires a configured station position; a satellite thermal "
                 "anomaly, NOT a confirmed wildfire (PRD §12 #13, FIRMS-FR-005)."
+            ),
+        ),
+    ),
+    # -- M6 airspace alerts (FAA TFR, AIRSPACE-FR, PRD §12 #15) ----------------------
+    # A TFR is an areal, time-bounded feature, so this is the first *areal* alert:
+    # geofence_intersects tests the TFR polygon against the operator's geofence shape
+    # (horizontal overlap only — the TFR's vertical limits are text, not a single
+    # altitude). It rides the ``enter`` transition, so it fires once when an intersecting
+    # TFR first appears and auto-resolves when the TFR ages out of live state. It ships
+    # WITHOUT a geofence_id (and disabled): the operator points it at one of their fences
+    # and enables it — with no geofence set the rule is unevaluable and visibly never
+    # fires (never a phantom overlap; PRD §37). #16 "TFR becomes active" lands separately.
+    (
+        "rule-tfr-intersects-geofence",
+        AlertRuleCreate(
+            name="TFR intersecting a geofence",
+            severity="medium",
+            subject_types=["tfr"],
+            conditions=[AlertCondition(field="geometry", operator="geofence_intersects")],
+            enabled=False,
+            transition="enter",
+            channels=["dashboard", "browser"],
+            description=(
+                "An FAA TFR whose area overlaps a configured geofence is on the map. Set "
+                "this rule's geofence and enable it; horizontal overlap only (the TFR's "
+                "altitude limits are not compared). Not a flight-planning product; consult "
+                "official FAA sources (PRD AIRSPACE-FR-007)."
             ),
         ),
     ),
