@@ -143,6 +143,23 @@ DEFAULT_USGS_RADIUS_NM = 500.0
 #: 0.0 ⇒ no magnitude floor (show everything in the AOI).
 DEFAULT_USGS_MIN_MAGNITUDE = 0.0
 
+#: SondeHub radiosonde feed (M5.2, PRD §11.9). Read-only crowd-sourced telemetry — no
+#: key, no terms gate; aether only *fetches* within the source cadence. The default is
+#: the public v2 REST base (the documented fallback to the preferred MQTT-WebSocket
+#: stream, SONDE-FR-002/003); the adapter appends ``/sondes?lat&lon&distance&last`` for
+#: the AOI. ``fake``/``demo`` selects the no-hardware feeder. The AOI center defaults to
+#: the station; sondes outside the radius are dropped at the adapter edge.
+DEFAULT_SONDEHUB_API_BASE = "https://api.v2.sondehub.org"
+#: Poll cadence; sonde frames arrive every few seconds upstream, but a ~30 s poll of the
+#: AOI map is ample for the COP and gentle on the public API (SONDE-FR-004 recency is
+#: bounded server-side by ``last``).
+DEFAULT_SONDEHUB_POLL_S = 30.0
+DEFAULT_SONDEHUB_TIMEOUT_S = 10.0
+DEFAULT_SONDEHUB_RADIUS_NM = 500.0
+#: ``last`` window (seconds): only sondes heard within this span are returned — drops
+#: landed/expired flights (SONDE-FR-004). One hour covers an active ascent+descent.
+DEFAULT_SONDEHUB_RECENCY_S = 3600.0
+
 #: Persistence store (M4, PRD §19). SQLite path; the WAL sidecars (`-wal`/`-shm`)
 #: sit alongside it. Live state never depends on this store (PRD §5), so it is off
 #: by default and a slow/failed disk only backs up the writer's own queue.
@@ -358,6 +375,19 @@ class Settings:
     usgs_poll_s: float = DEFAULT_USGS_POLL_S
     usgs_timeout_s: float = DEFAULT_USGS_TIMEOUT_S
 
+    #: Run the SondeHub radiosonde adapter alongside the backend (M5.2, PRD §11.9). Off
+    #: by default — opt in with ``AETHER_SONDEHUB=1``. Read-only public REST, no key. The
+    #: AOI center defaults to the station; ``sondehub_api_base=fake`` selects the
+    #: no-hardware feeder.
+    sondehub: bool = False
+    sondehub_api_base: str = DEFAULT_SONDEHUB_API_BASE
+    sondehub_center_lat: float = DEFAULT_STATION_LAT
+    sondehub_center_lon: float = DEFAULT_STATION_LON
+    sondehub_radius_nm: float = DEFAULT_SONDEHUB_RADIUS_NM
+    sondehub_recency_s: float = DEFAULT_SONDEHUB_RECENCY_S
+    sondehub_poll_s: float = DEFAULT_SONDEHUB_POLL_S
+    sondehub_timeout_s: float = DEFAULT_SONDEHUB_TIMEOUT_S
+
     #: Persist fused records to SQLite (M4, PRD §19). Off by default — persistence
     #: is a *sibling* bus consumer that never gates serving live state (PRD §5).
     #: Track history is the first consumer; retention/alerts/replay build on the same
@@ -525,6 +555,22 @@ class Settings:
             ),
             usgs_poll_s=float(os.environ.get("AETHER_USGS_POLL_S", DEFAULT_USGS_POLL_S)),
             usgs_timeout_s=float(os.environ.get("AETHER_USGS_TIMEOUT_S", DEFAULT_USGS_TIMEOUT_S)),
+            sondehub=_env_bool("AETHER_SONDEHUB", False),
+            sondehub_api_base=os.environ.get("AETHER_SONDEHUB_API_BASE", DEFAULT_SONDEHUB_API_BASE),
+            sondehub_center_lat=float(os.environ.get("AETHER_SONDEHUB_LAT", station_lat)),
+            sondehub_center_lon=float(os.environ.get("AETHER_SONDEHUB_LON", station_lon)),
+            sondehub_radius_nm=float(
+                os.environ.get("AETHER_SONDEHUB_RADIUS_NM", DEFAULT_SONDEHUB_RADIUS_NM)
+            ),
+            sondehub_recency_s=float(
+                os.environ.get("AETHER_SONDEHUB_RECENCY_S", DEFAULT_SONDEHUB_RECENCY_S)
+            ),
+            sondehub_poll_s=float(
+                os.environ.get("AETHER_SONDEHUB_POLL_S", DEFAULT_SONDEHUB_POLL_S)
+            ),
+            sondehub_timeout_s=float(
+                os.environ.get("AETHER_SONDEHUB_TIMEOUT_S", DEFAULT_SONDEHUB_TIMEOUT_S)
+            ),
             persist=_env_bool("AETHER_PERSIST", False),
             db_path=os.environ.get("AETHER_DB_PATH", DEFAULT_DB_PATH),
             persist_queue_max=int(
