@@ -128,6 +128,21 @@ DEFAULT_AIS_THROTTLE_S = 1.0
 #: is no data-silence stall: a quiet AOI legitimately sends nothing.
 DEFAULT_AIS_TIMEOUT_S = 10.0
 
+#: USGS earthquake feed (M5.1, PRD §11.12). Public-domain GeoJSON — no key, no terms
+#: gate; aether only *fetches* within the feed cadence. The default is the ``all_hour``
+#: summary (small, regenerates ~every minute); operators may point at ``all_day`` /
+#: ``2.5_day`` / ``significant_month`` etc. ``fake``/``demo`` selects the no-hardware
+#: feeder. The AOI center defaults to the station; quakes outside the radius or below
+#: ``min_magnitude`` are dropped at the adapter edge.
+DEFAULT_USGS_FEED_URL = "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_hour.geojson"
+#: Poll no faster than the feed regeneration cadence (USGS-FR-002); summary feeds
+#: refresh about once a minute.
+DEFAULT_USGS_POLL_S = 60.0
+DEFAULT_USGS_TIMEOUT_S = 10.0
+DEFAULT_USGS_RADIUS_NM = 500.0
+#: 0.0 ⇒ no magnitude floor (show everything in the AOI).
+DEFAULT_USGS_MIN_MAGNITUDE = 0.0
+
 #: Persistence store (M4, PRD §19). SQLite path; the WAL sidecars (`-wal`/`-shm`)
 #: sit alongside it. Live state never depends on this store (PRD §5), so it is off
 #: by default and a slow/failed disk only backs up the writer's own queue.
@@ -331,6 +346,18 @@ class Settings:
     ais_throttle_s: float = DEFAULT_AIS_THROTTLE_S
     ais_timeout_s: float = DEFAULT_AIS_TIMEOUT_S
 
+    #: Run the USGS earthquake adapter alongside the backend (M5.1, PRD §11.12). Off by
+    #: default — opt in with ``AETHER_USGS=1``. Read-only public GeoJSON, no key. The AOI
+    #: center defaults to the station; ``usgs_feed_url=fake`` selects the no-hardware feeder.
+    usgs: bool = False
+    usgs_feed_url: str = DEFAULT_USGS_FEED_URL
+    usgs_center_lat: float = DEFAULT_STATION_LAT
+    usgs_center_lon: float = DEFAULT_STATION_LON
+    usgs_radius_nm: float = DEFAULT_USGS_RADIUS_NM
+    usgs_min_magnitude: float = DEFAULT_USGS_MIN_MAGNITUDE
+    usgs_poll_s: float = DEFAULT_USGS_POLL_S
+    usgs_timeout_s: float = DEFAULT_USGS_TIMEOUT_S
+
     #: Persist fused records to SQLite (M4, PRD §19). Off by default — persistence
     #: is a *sibling* bus consumer that never gates serving live state (PRD §5).
     #: Track history is the first consumer; retention/alerts/replay build on the same
@@ -488,6 +515,16 @@ class Settings:
             ais_radius_nm=float(os.environ.get("AETHER_AIS_RADIUS_NM", DEFAULT_AIS_RADIUS_NM)),
             ais_throttle_s=float(os.environ.get("AETHER_AIS_THROTTLE_S", DEFAULT_AIS_THROTTLE_S)),
             ais_timeout_s=float(os.environ.get("AETHER_AIS_TIMEOUT_S", DEFAULT_AIS_TIMEOUT_S)),
+            usgs=_env_bool("AETHER_USGS", False),
+            usgs_feed_url=os.environ.get("AETHER_USGS_FEED_URL", DEFAULT_USGS_FEED_URL),
+            usgs_center_lat=float(os.environ.get("AETHER_USGS_LAT", station_lat)),
+            usgs_center_lon=float(os.environ.get("AETHER_USGS_LON", station_lon)),
+            usgs_radius_nm=float(os.environ.get("AETHER_USGS_RADIUS_NM", DEFAULT_USGS_RADIUS_NM)),
+            usgs_min_magnitude=float(
+                os.environ.get("AETHER_USGS_MIN_MAGNITUDE", DEFAULT_USGS_MIN_MAGNITUDE)
+            ),
+            usgs_poll_s=float(os.environ.get("AETHER_USGS_POLL_S", DEFAULT_USGS_POLL_S)),
+            usgs_timeout_s=float(os.environ.get("AETHER_USGS_TIMEOUT_S", DEFAULT_USGS_TIMEOUT_S)),
             persist=_env_bool("AETHER_PERSIST", False),
             db_path=os.environ.get("AETHER_DB_PATH", DEFAULT_DB_PATH),
             persist_queue_max=int(
