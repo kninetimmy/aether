@@ -197,6 +197,61 @@ export function toiHighlight(): ToiHighlight {
   return TOI_HIGHLIGHT;
 }
 
+// --- Lightning clustering (PRD §24.3, §2061; LIGHTNING-FR-006) --------------
+// Dense GLM flash points are clustered client-side so a storm stays legible at
+// low zoom (LIGHTNING-FR-006). All lightning styling lives here (centralized
+// presentation, §5): the map component owns the MapLibre source/layer/expression
+// shapes, but reads every color and size from this one place. A cluster bubble
+// encodes its flash count three ways — bigger radius, hotter color, AND a printed
+// count — so color is never the only channel (§24.9). Counting flashes is an
+// honest aggregate: it never restates GLM's total-lightning caveat (a cluster of
+// flashes is still not a count of confirmed cloud-to-ground strikes, LIGHTNING-FR-004).
+
+export interface LightningStyle {
+  /** An individual, unclustered flash dot. */
+  flashColor: string;
+  flashRadius: number;
+  /**
+   * Cluster bubble color by contained flash count (storm-intensity proxy).
+   * `base` is the sub-`steps[0][0]` color; each [count, color] raises the color
+   * at/above that count. Feeds a MapLibre `step` expression over `point_count`.
+   */
+  clusterColor: { base: string; steps: [number, string][] };
+  /** Cluster bubble radius (px) by flash count; same `step` shape as the color. */
+  clusterRadius: { base: number; steps: [number, number][] };
+  /** Color of the count label printed on a cluster bubble. */
+  countColor: string;
+}
+
+const LIGHTNING_STYLE: LightningStyle = {
+  // A lone flash reuses the registry's lightning_flash color so clustered and
+  // unclustered lightning read as one layer.
+  flashColor: FEATURE_PRESENTATION.lightning_flash.color,
+  flashRadius: 3,
+  clusterColor: {
+    base: FEATURE_PRESENTATION.lightning_flash.color, // few flashes — calm yellow
+    steps: [
+      [10, FEATURE_PRESENTATION.lightning_cluster.color],
+      [50, "#ff9f1a"],
+      [200, "#ff5a1a"], // a dense, active cell — hot orange
+    ],
+  },
+  clusterRadius: {
+    base: 12,
+    steps: [
+      [10, 16],
+      [50, 22],
+      [200, 30],
+    ],
+  },
+  countColor: "#1a1205", // dark ink legible on the yellow→orange bubbles
+};
+
+/** The single lightning-clustering style (flash dot + cluster ramps + label). */
+export function lightningStyle(): LightningStyle {
+  return LIGHTNING_STYLE;
+}
+
 /** Honest military badge for a track, or null when it is not flagged military. */
 export function militaryBadge(
   classification: Classification | null | undefined,

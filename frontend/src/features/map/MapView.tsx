@@ -9,6 +9,7 @@ import maplibregl, { type Map as MlMap } from "maplibre-gl";
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import {
   featureFeatureCollection,
+  lightningFeatureCollection,
   trackFeatureCollection,
 } from "../../map/layers/recordLayers";
 import {
@@ -17,14 +18,44 @@ import {
   basemapStyle,
   usingHostedBasemap,
 } from "../../map/style/basemap";
-import { toiHighlight } from "../../map/presentationRegistry";
+import { lightningStyle, toiHighlight } from "../../map/presentationRegistry";
 import { visibleTracks } from "../../state/selectors";
 import { replayVisibleRecords } from "../../state/replay";
 import { isLayerVisible, useStore } from "../../state/store";
-import type { GeoFeatureRecord, TrackRecord } from "../../types/records";
+import type {
+  GeoFeatureRecord,
+  GeoJSONPoint,
+  TrackRecord,
+} from "../../types/records";
 
 const TRACK_SOURCE = "aether-tracks";
 const FEATURE_SOURCE = "aether-features";
+// Clustered lightning lives in its own source (clustering is a per-source flag;
+// the shared feature source also carries polygons). LIGHTNING-FR-006 / PRD §24.3.
+const LIGHTNING_SOURCE = "aether-lightning";
+// The lightning layers all derive from the one presentation layer key, so the
+// existing "Lightning" toggle in LayerControl gates every one of them at once.
+const LIGHTNING_LAYER_KEY = "features-lightning";
+const LIGHTNING_LAYER_IDS = [
+  "lightning-clusters",
+  "lightning-cluster-count",
+  "lightning-flash",
+] as const;
+
+// Build a MapLibre `step` expression from a {base, steps:[stop,output]} ramp:
+// step(input, base, stop0, out0, stop1, out1, …). Lets the centralized lightning
+// style own the numbers while the map owns the expression shape.
+function stepExpr(
+  input: maplibregl.ExpressionSpecification,
+  ramp: { base: number | string; steps: [number, number | string][] },
+): maplibregl.ExpressionSpecification {
+  return [
+    "step",
+    input,
+    ramp.base,
+    ...ramp.steps.flatMap(([stop, out]) => [stop, out]),
+  ] as unknown as maplibregl.ExpressionSpecification;
+}
 
 /** Stable empty feature map for replay (track-only persistence hides live overlays). */
 const EMPTY_FEATURES = new Map<string, GeoFeatureRecord>();
@@ -131,6 +162,12 @@ export function MapView() {
     () => featureFeatureCollection(inReplay ? EMPTY_FEATURES : features),
     [inReplay, features],
   );
+  // Lightning is split into its own clustered source (LIGHTNING-FR-006). Like the
+  // generic feature source it carries no historical data, so replay shows none.
+  const lightningFc = useMemo(
+    () => lightningFeatureCollection(inReplay ? EMPTY_FEATURES : features),
+    [inReplay, features],
+  );
 
   // Initialize the map once.
   useEffect(() => {
@@ -157,6 +194,18 @@ export function MapView() {
         map.addSource(TRACK_SOURCE, { type: "geojson", data: emptyFc() });
       if (!map.getSource(FEATURE_SOURCE))
         map.addSource(FEATURE_SOURCE, { type: "geojson", data: emptyFc() });
+      // Lightning gets a clustered source: GLM emits one point per flash, which
+      // is illegible at low zoom during a storm (LIGHTNING-FR-006). MapLibre
+      // aggregates nearby flashes into a single bubble below clusterMaxZoom and
+      // splits them back into individual flashes above it.
+      if (!map.getSource(LIGHTNING_SOURCE))
+        map.addSource(LIGHTNING_SOURCE, {
+          type: "geojson",
+          data: emptyFc(),
+          cluster: true,
+          clusterRadius: 50,
+          clusterMaxZoom: 9,
+        });
 
       // Geo-feature areas underneath tracks.
       if (!map.getLayer("features-fill"))
@@ -185,6 +234,52 @@ export function MapView() {
             "circle-radius": 4,
             "circle-color": ["get", "color"],
             "circle-opacity": 0.85,
+          },
+        });
+
+      // Lightning (clustered). Three layers off the one clustered source: cluster
+      // bubbles (only features with `point_count`), the count label on each bubble,
+      // and individual unclustered flashes. Bigger+hotter bubble AND a printed
+      // count both encode density, so color is never the only channel (§24.9). All
+      // sizes/colors come from the centralized lightning style.
+      const ls = lightningStyle();
+      if (!map.getLayer("lightning-clusters"))
+        map.addLayer({
+          id: "lightning-clusters",
+          type: "circle",
+          source: LIGHTNING_SOURCE,
+          filter: ["has", "point_count"],
+          paint: {
+            "circle-color": stepExpr(["get", "point_count"], ls.clusterColor),
+            "circle-radius": stepExpr(["get", "point_count"], ls.clusterRadius),
+            "circle-opacity": 0.85,
+            "circle-stroke-color": "#1a1205",
+            "circle-stroke-width": 1,
+          },
+        });
+      if (!map.getLayer("lightning-cluster-count"))
+        map.addLayer({
+          id: "lightning-cluster-count",
+          type: "symbol",
+          source: LIGHTNING_SOURCE,
+          filter: ["has", "point_count"],
+          layout: {
+            "text-field": ["get", "point_count_abbreviated"],
+            "text-size": 11,
+            "text-allow-overlap": true,
+          },
+          paint: { "text-color": ls.countColor },
+        });
+      if (!map.getLayer("lightning-flash"))
+        map.addLayer({
+          id: "lightning-flash",
+          type: "circle",
+          source: LIGHTNING_SOURCE,
+          filter: ["!", ["has", "point_count"]],
+          paint: {
+            "circle-radius": ls.flashRadius,
+            "circle-color": ls.flashColor,
+            "circle-opacity": 0.9,
           },
         });
 
@@ -244,6 +339,29 @@ export function MapView() {
     map.on("mouseleave", "tracks-point", () => {
       map.getCanvas().style.cursor = "";
     });
+    // Click a lightning cluster to zoom to the level where it breaks apart — the
+    // standard cluster drill-down. Best-effort: any query/source miss is a no-op.
+    map.on("click", "lightning-clusters", (e) => {
+      const f = e.features?.[0];
+      const clusterId = f?.properties?.["cluster_id"];
+      const src = map.getSource(LIGHTNING_SOURCE) as
+        | maplibregl.GeoJSONSource
+        | undefined;
+      if (typeof clusterId !== "number" || !src) return;
+      void src
+        .getClusterExpansionZoom(clusterId)
+        .then((zoom) => {
+          const coords = (f?.geometry as GeoJSONPoint | undefined)?.coordinates;
+          if (coords) map.easeTo({ center: [coords[0], coords[1]], zoom });
+        })
+        .catch(() => {});
+    });
+    map.on("mouseenter", "lightning-clusters", () => {
+      map.getCanvas().style.cursor = "pointer";
+    });
+    map.on("mouseleave", "lightning-clusters", () => {
+      map.getCanvas().style.cursor = "";
+    });
     // Viewport change → debounced server re-subscribe (M3.6b). Routed through a
     // ref so this once-registered handler always uses the freshest filters.
     map.on("moveend", () => sendSubscribeRef.current());
@@ -299,12 +417,15 @@ export function MapView() {
     (map.getSource(FEATURE_SOURCE) as maplibregl.GeoJSONSource | undefined)?.setData(
       featureFc as never,
     );
+    (
+      map.getSource(LIGHTNING_SOURCE) as maplibregl.GeoJSONSource | undefined
+    )?.setData(lightningFc as never);
   }
 
   useEffect(() => {
     pushData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [trackFc, featureFc]);
+  }, [trackFc, featureFc, lightningFc]);
 
   // Apply layer-visibility toggles via per-feature filters.
   useEffect(() => {
@@ -328,6 +449,16 @@ export function MapView() {
       const isToi = ["==", ["get", "isToi"], true] as const;
       const combined = layerHidden ? ["all", isToi, layerHidden] : isToi;
       map.setFilter("tracks-highlight", combined as never);
+    }
+    // The lightning layers come from a separate clustered source, so a per-feature
+    // `layer`-property filter can't reach them (clusters MapLibre synthesizes carry
+    // no `layer` prop). Gate all three by layout visibility off the same
+    // `features-lightning` toggle the LayerControl drives — so hiding "Lightning"
+    // clears the flashes AND the cluster bubbles together.
+    const lightningVisible = isLayerVisible(state, LIGHTNING_LAYER_KEY);
+    for (const id of LIGHTNING_LAYER_IDS) {
+      if (map.getLayer(id))
+        map.setLayoutProperty(id, "visibility", lightningVisible ? "visible" : "none");
     }
   }, [layerVisible]);
 
