@@ -297,6 +297,93 @@ def test_geofence_intersects_unevaluable_for_point_feature() -> None:
     assert engine.evaluate(_change(_quake(STATION_LON, STATION_LAT))) == []  # on the fence center
 
 
+# --- TFR activation (became_active, PRD §32 #16) ------------------------------
+
+
+def _timed_tfr(
+    *,
+    valid_from: datetime | None,
+    valid_until: datetime | None = None,
+    id: str = "tfr:faa:6_9513",
+) -> GeoFeatureRecord:
+    return GeoFeatureRecord(
+        id=id,
+        source="faa_tfr",
+        observed_at=T0,
+        received_at=T0,
+        published_at=T0,
+        correlation_key=id,
+        feature_type="tfr",
+        geometry=Polygon(coordinates=[_box_ring(-95.2, 39.9, -94.8, 40.1)]),
+        valid_from=valid_from,
+        valid_until=valid_until,
+        label="Test TFR",
+    )
+
+
+def _became_active_rule() -> AlertRule:
+    return _rule(
+        subject_types=["tfr"],
+        conditions=[AlertCondition(field="valid_from", operator="became_active")],
+        transition="enter",
+    )
+
+
+def test_became_active_fires_when_clock_crosses_valid_from() -> None:
+    clock = _Clock(T0)
+    engine = _engine(clock, [_became_active_rule()])
+    tfr = _timed_tfr(valid_from=T0 + timedelta(minutes=10), valid_until=T0 + timedelta(hours=2))
+
+    # Ingested while pending → level False → no fire, but the baseline is established.
+    assert engine.evaluate(_change(tfr)) == []
+
+    # The live-state sweep re-drives the unchanged TFR once now ≥ valid_from → fires.
+    clock.t = T0 + timedelta(minutes=10)
+    out = engine.evaluate(_change(tfr))
+    assert len(out) == 1 and out[0].state == "open"
+
+    # A further re-drive while still active dedups against the still-open alert.
+    clock.t = T0 + timedelta(minutes=11)
+    assert engine.evaluate(_change(tfr)) == []
+
+    # The TFR ages out (valid_until) → feature remove → the open alert auto-resolves.
+    resolved = engine.evaluate(
+        StateChange(seq=2, op="remove", kind="feature", id=tfr.id, record=None)
+    )
+    assert len(resolved) == 1 and resolved[0].state == "resolved"
+
+
+def test_became_active_fires_on_first_sight_already_active() -> None:
+    # Decided semantics: a TFR first received already inside its active window fires on
+    # first sight (active-now), not only on an observed pending→active transition.
+    clock = _Clock(T0)
+    engine = _engine(clock, [_became_active_rule()])
+    already = _timed_tfr(valid_from=T0 - timedelta(minutes=5), valid_until=T0 + timedelta(hours=1))
+    out = engine.evaluate(_change(already))
+    assert len(out) == 1 and out[0].state == "open"
+
+
+def test_became_active_unevaluable_without_valid_from() -> None:
+    # A TFR with no parsed effective time is an honest unknown — never a confident
+    # "active" (no fire), and the engine does nothing (PRD §37).
+    clock = _Clock(T0)
+    engine = _engine(clock, [_became_active_rule()])
+    assert engine.evaluate(_change(_timed_tfr(valid_from=None))) == []
+
+
+def test_became_active_unevaluable_for_track() -> None:
+    # A track carries no validity window, so the operator is unevaluable for it — the
+    # rule never fires on a non-feature subject even if mistakenly pointed at one.
+    clock = _Clock(T0)
+    rule = _rule(
+        subject_types=["aircraft"],
+        conditions=[AlertCondition(field="valid_from", operator="became_active")],
+        transition="enter",
+    )
+    engine = _engine(clock, [rule])
+    assert engine.evaluate(_change(_track(STATION_LON, STATION_LAT))) == []
+
+
 # --- distance -----------------------------------------------------------------
 
 

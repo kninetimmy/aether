@@ -82,6 +82,10 @@ class LiveState:
         self._source_status: dict[str, SourceStatusRecord] = {}
         self._events: deque[EventRecord] = deque(maxlen=recent_events_max)
         self._fusion = fusion if fusion is not None else FusionEngine()
+        #: Wall clock of the previous :meth:`expire` sweep, so the next sweep can detect
+        #: a feature crossing its ``valid_from`` in the elapsed interval and re-drive it
+        #: (the "became active" edge; PRD §32 #16). ``None`` until the first sweep.
+        self._last_expire_now: datetime | None = None
 
     @property
     def seq(self) -> int:
@@ -170,6 +174,13 @@ class LiveState:
         3. The existing ``valid_until`` sweep catches ``None``-key tracks and
            features; ids the engine already handled are skipped (and ``remove``
            is idempotent via ``pop`` regardless).
+        4. Features that *crossed* ``valid_from`` since the previous sweep are
+           re-driven (re-upserted unchanged) so a clock-aware ``became_active``
+           alert sees the rising edge with no new ingest (PRD §32 #16). A feed may
+           dedupe an unchanged revision, so the activation edge cannot rely on a
+           re-poll; this sweep is the clock. Re-driving an unchanged record is
+           idempotent — the alert engine's edge detection ignores a re-drive that
+           does not change a rule's level, and websocket clients just re-apply it.
 
         Each per-group recompute is isolated like :meth:`apply`: a single poison
         group whose ``fuse`` raises is logged and dropped from the engine rather
@@ -214,6 +225,17 @@ class LiveState:
             if f.valid_until is not None and f.valid_until <= now
         ]:
             changes.append(self.remove("feature", fid))
+
+        # Re-drive features that crossed valid_from in (prev, now], so a became_active
+        # alert fires with no new ingest (PRD §32 #16). Expired features are already
+        # popped above, so an entirely-past window never re-drives. ``prev is None``
+        # (first sweep) re-drives nothing — features present then were driven on apply.
+        prev = self._last_expire_now
+        if prev is not None:
+            for fid, f in self._features.items():
+                if f.valid_from is not None and prev < f.valid_from <= now:
+                    changes.append(StateChange(self._seq.next(), "upsert", "feature", fid, f))
+        self._last_expire_now = now
         return changes
 
     def get_track(self, track_id: str) -> TrackRecord | None:

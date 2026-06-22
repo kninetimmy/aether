@@ -73,6 +73,7 @@ CONTEXTUAL_OPERATORS: frozenset[ConditionOperator] = frozenset(
         "entered_geofence",
         "exited_geofence",
         "geofence_intersects",
+        "became_active",
         "count_within_window",
         "distance_below",
         "distance_above",

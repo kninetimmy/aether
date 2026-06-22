@@ -3,8 +3,9 @@
 The stateless core answers "does this one snapshot satisfy a stateless leaf?". A
 *contextual* leaf needs more: a geofence shape (entered/exited_geofence), the
 station/geofence position + a geometry (distance_*/elevation_crossed), a per-subject
-timestamp history (count_within_window), or the subject's *prior* field value
-(changed_to/from). This module holds exactly that missing per-subject state and
+timestamp history (count_within_window), the subject's *prior* field value
+(changed_to/from), or a time-bounded feature's activation clock (became_active). This
+module holds exactly that missing per-subject (or clock-relative) state and
 collapses a contextual rule's whole AND into the SAME boolean *level* (plus a
 discrete flag) the engine already consumes for stateless rules, so the engine's
 transition/cooldown/dedup/auto-resolve machinery is reused verbatim. One firing
@@ -236,6 +237,9 @@ class ContextualEvaluator:
                 elif op in _CHANGED_OPERATORS:
                     discrete = True
                     ok = self._eval_changed(cond, state, dump, first_obs)
+                elif op == "became_active":
+                    ok, ev = self._eval_became_active(record, now)
+                    evaluable = evaluable and ev
                 else:  # geometry leaves
                     ok, ev = self._eval_geometry(op, cond, rule, record)
                     evaluable = evaluable and ev
@@ -379,6 +383,26 @@ class ContextualEvaluator:
         if rings is None:
             return False, False
         return geo.geofence_intersects_rings(gf, rings), True
+
+    def _eval_became_active(self, record: Record, now: datetime) -> tuple[bool, bool]:
+        """Temporal level for ``became_active``: is a feature inside its active window now?
+
+        The "becomes active" edge of a time-bounded geo-feature (a TFR now, a NOTAM
+        geometry later). The level goes True once ``now`` reaches the feature's
+        ``valid_from`` — that rising edge fires under the ``enter`` transition. The
+        upper bound needs no test here: when ``valid_until`` passes, the live-state
+        sweep removes the feature and the engine auto-resolves the open alert
+        (``_on_remove``). Unevaluable for a record with no ``valid_from`` (a track, or
+        a TFR with no effective time) — an honest "unknown", never a confident "not
+        active yet" (PRD §37).
+
+        No observation arrives *at* ``valid_from`` (a feed may dedupe an unchanged
+        revision), so the clock-driven live-state sweep re-drives a feature the moment
+        it crosses ``valid_from`` to deliver this rising edge with no new ingest
+        (``LiveState.expire``, PRD §32 #16)."""
+        if not isinstance(record, GeoFeatureRecord) or record.valid_from is None:
+            return False, False
+        return record.valid_from <= now, True
 
     def _eval_distance(
         self, op: str, cond: AlertCondition, rule: AlertRule, lon: float, lat: float
