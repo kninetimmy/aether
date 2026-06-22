@@ -27,6 +27,7 @@ from fastapi.staticfiles import StaticFiles
 
 from aether.adapters.ais import run_ais
 from aether.adapters.aprs_is import run_aprs_is
+from aether.adapters.faa_notam import run_faa_notam
 from aether.adapters.faa_tfr import run_faa_tfr
 from aether.adapters.firms import run_firms
 from aether.adapters.lightning_glm import run_glm
@@ -187,6 +188,8 @@ def create_app(*, settings: Settings | None = None, demo_interval_s: float = 1.0
             tasks.append(asyncio.create_task(run_glm(cfg, ready)))
         if cfg.faa_tfr:
             tasks.append(asyncio.create_task(run_faa_tfr(cfg, ready)))
+        if cfg.faa_notam:
+            tasks.append(asyncio.create_task(run_faa_notam(cfg, ready)))
         if cfg.persist:
             # Ensure the schema exists *before* the sibling tasks and the seed run:
             # a short opener applies migrations idempotently (the writer below reopens
