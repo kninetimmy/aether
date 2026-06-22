@@ -70,3 +70,13 @@ def test_tfr_template_targets_tfr_layer_with_areal_operator() -> None:
     # Ships without a geofence wired — operator points it at one of their fences. With
     # none set the rule is unevaluable and visibly never fires (no phantom overlap).
     assert tfr.geofence_id is None
+
+
+def test_tfr_became_active_template_targets_tfr_layer_with_temporal_operator() -> None:
+    tfr = {t.id: t for t in default_rule_templates(T0)}["rule-tfr-became-active"]
+    assert tfr.subject_types == ["tfr"]
+    assert tfr.transition == "enter"  # fire once on activation, auto-resolve on expiry (#16)
+    cond = tfr.conditions[0]
+    assert (cond.field, cond.operator) == ("valid_from", "became_active")
+    # AOI-wide by default; no geofence wired (pair with a fence/distance rule to scope).
+    assert tfr.geofence_id is None

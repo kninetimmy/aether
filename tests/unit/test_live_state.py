@@ -73,7 +73,11 @@ def _track(id: str = "aircraft:1", valid_until: datetime | None = None) -> Track
     )
 
 
-def _feature(id: str = "tfr:1", valid_until: datetime | None = None) -> GeoFeatureRecord:
+def _feature(
+    id: str = "tfr:1",
+    valid_until: datetime | None = None,
+    valid_from: datetime | None = None,
+) -> GeoFeatureRecord:
     return GeoFeatureRecord(
         id=id,
         source="demo",
@@ -82,6 +86,7 @@ def _feature(id: str = "tfr:1", valid_until: datetime | None = None) -> GeoFeatu
         published_at=T0,
         feature_type="tfr",
         geometry={"type": "Point", "coordinates": [-95.0, 40.0]},
+        valid_from=valid_from,
         valid_until=valid_until,
     )
 
@@ -170,6 +175,77 @@ def test_expire_removes_past_valid_until() -> None:
     changes = state.expire(now=T0 + timedelta(minutes=1))
     assert [c.id for c in changes] == ["stale"]
     assert [t.id for t in state.snapshot().tracks] == ["fresh"]
+
+
+# --- Feature activation re-drive (became_active edge, PRD §32 #16) ----------
+
+
+def test_expire_redrives_feature_crossing_valid_from() -> None:
+    # A TFR ingested while still pending: when a sweep's clock crosses its valid_from,
+    # the feature is re-driven (re-upserted unchanged) so a clock-aware became_active
+    # alert sees the rising edge with no new ingest.
+    state = LiveState()
+    state.apply(
+        _feature(
+            id="tfr:soon",
+            valid_from=T0 + timedelta(minutes=10),
+            valid_until=T0 + timedelta(hours=2),
+        )
+    )
+    # A sweep before valid_from sets the baseline clock and re-drives nothing.
+    assert state.expire(now=T0 + timedelta(minutes=1)) == []
+    # A sweep after valid_from re-drives exactly that feature as an upsert.
+    changes = state.expire(now=T0 + timedelta(minutes=11))
+    assert [(c.op, c.kind, c.id) for c in changes] == [("upsert", "feature", "tfr:soon")]
+    # The re-drive carries the unchanged record (idempotent for clients and the engine).
+    assert changes[0].record is not None and changes[0].record.id == "tfr:soon"
+    # The crossing happened once: a later sweep does not re-drive it again.
+    assert state.expire(now=T0 + timedelta(minutes=12)) == []
+
+
+def test_expire_does_not_redrive_before_valid_from() -> None:
+    state = LiveState()
+    state.apply(_feature(id="tfr:later", valid_from=T0 + timedelta(hours=1)))
+    state.expire(now=T0)  # baseline
+    assert state.expire(now=T0 + timedelta(minutes=5)) == []  # still pending
+
+
+def test_expire_does_not_redrive_feature_without_valid_from() -> None:
+    # A TFR with no parsed effective time has nothing to activate — never re-driven.
+    state = LiveState()
+    state.apply(_feature(id="tfr:open", valid_until=T0 + timedelta(hours=1)))
+    state.expire(now=T0)
+    assert state.expire(now=T0 + timedelta(minutes=5)) == []
+
+
+def test_expire_does_not_redrive_already_expired_feature() -> None:
+    # valid_from and valid_until both fall in one sweep gap: the feature is removed and
+    # never re-driven — no became_active for a window already entirely in the past.
+    state = LiveState()
+    state.apply(
+        _feature(
+            id="tfr:brief",
+            valid_from=T0 + timedelta(minutes=1),
+            valid_until=T0 + timedelta(minutes=2),
+        )
+    )
+    state.expire(now=T0)  # baseline before the window
+    changes = state.expire(now=T0 + timedelta(minutes=5))  # both bounds crossed
+    assert [(c.op, c.id) for c in changes] == [("remove", "tfr:brief")]
+
+
+def test_first_sweep_does_not_redrive_already_active_feature() -> None:
+    # The very first sweep has no previous clock, so it re-drives nothing even for an
+    # already-active feature — that feature was driven on apply(), not the sweep.
+    state = LiveState()
+    state.apply(
+        _feature(
+            id="tfr:active",
+            valid_from=T0 - timedelta(minutes=5),
+            valid_until=T0 + timedelta(hours=1),
+        )
+    )
+    assert state.expire(now=T0) == []
 
 
 def test_recent_events_are_bounded() -> None:

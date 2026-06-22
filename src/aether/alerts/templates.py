@@ -17,8 +17,8 @@ defined yet:
   slice (geofence containment + watchlist matching).
 - APRS emergency/message (#8, #10), AIS (#22, #23): with their detail semantics.
 - lightning/satellite/balloon (#11/#12, #17–#21): the M5/M6 slice that lands each
-  source (earthquakes #14, FIRMS detections #13, and TFR-intersects-geofence #15 are
-  done; TFR-becomes-active #16 and the rest seed with theirs).
+  source (earthquakes #14, FIRMS detections #13, TFR-intersects-geofence #15, and
+  TFR-becomes-active #16 are done; the rest seed with theirs).
 - disk-budget/time-sync (#25, #26): with the system-event sources that raise them.
 
 Templates are defined as ``(id, AlertRuleCreate)`` pairs and stamped with ``now``
@@ -197,7 +197,7 @@ _TEMPLATES: tuple[tuple[str, AlertRuleCreate], ...] = (
     # TFR first appears and auto-resolves when the TFR ages out of live state. It ships
     # WITHOUT a geofence_id (and disabled): the operator points it at one of their fences
     # and enables it — with no geofence set the rule is unevaluable and visibly never
-    # fires (never a phantom overlap; PRD §37). #16 "TFR becomes active" lands separately.
+    # fires (never a phantom overlap; PRD §37).
     (
         "rule-tfr-intersects-geofence",
         AlertRuleCreate(
@@ -213,6 +213,34 @@ _TEMPLATES: tuple[tuple[str, AlertRuleCreate], ...] = (
                 "this rule's geofence and enable it; horizontal overlap only (the TFR's "
                 "altitude limits are not compared). Not a flight-planning product; consult "
                 "official FAA sources (PRD AIRSPACE-FR-007)."
+            ),
+        ),
+    ),
+    # A TFR is time-bounded (valid_from..valid_until), so this fires on the *activation*
+    # edge: ``became_active`` is True once the clock reaches valid_from. No observation
+    # arrives at that instant (a re-poll may dedupe the unchanged revision), so the
+    # live-state sweep re-drives a TFR crossing valid_from to deliver the rising edge
+    # (PRD §32 #16). It rides ``enter`` — fires once on activation (or first sight if a
+    # TFR is already active) and auto-resolves when the TFR expires out of live state.
+    # AOI-wide and disabled by default; pair it with a geofence/distance rule to scope
+    # which activations matter. A TFR with no parsed effective time is unevaluable, so
+    # the rule visibly never fires on it rather than inventing an activation (PRD §37).
+    (
+        "rule-tfr-became-active",
+        AlertRuleCreate(
+            name="TFR became active",
+            severity="medium",
+            subject_types=["tfr"],
+            conditions=[AlertCondition(field="valid_from", operator="became_active")],
+            enabled=False,
+            transition="enter",
+            channels=["dashboard", "browser"],
+            description=(
+                "An FAA TFR reached its effective time and is now active inside the AOI "
+                "(or was already active when first received). Fires once on activation and "
+                "auto-resolves when the TFR expires. AOI-wide; pair with a geofence or "
+                "distance rule to scope it. Not a flight-planning product; consult official "
+                "FAA sources (PRD AIRSPACE-FR-007)."
             ),
         ),
     ),
