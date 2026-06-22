@@ -40,6 +40,13 @@ dev = [
 lightning = [
     "netCDF4>=1.6",
 ]
+# CelesTrak orbital adapter SGP4 propagator (M6.5, PRD §11.14/§18.12). Optional/
+# capability-gated: the adapter degrades to an `offline` status if absent
+# (`pip install "aether[orbital]"`). MIT-licensed; the scalar propagation path needs
+# no numpy. Imported only inside the live CelesTrak provider, behind a capability gate.
+orbital = [
+    "sgp4>=2.25",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/aether"]
@@ -67,7 +74,7 @@ warn_required_dynamic_aliases = true
 # untyped so the strict gate is green whether or not `[lightning]` is installed. They are
 # imported only inside the live GLM provider, behind a capability gate.
 [[tool.mypy.overrides]]
-module = ["netCDF4", "numpy", "numpy.*"]
+module = ["netCDF4", "numpy", "numpy.*", "sgp4", "sgp4.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
