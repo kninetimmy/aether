@@ -241,6 +241,31 @@ DEFAULT_FAA_NOTAM_TIMEOUT_S = 15.0
 DEFAULT_FAA_NOTAM_PAGE_SIZE = 50
 DEFAULT_FAA_NOTAM_MAX_PAGES_PER_POLL = 5
 
+#: CelesTrak orbital tracking (M6.5, PRD §11.14/§18.12). Off by default; opt in with
+#: ``AETHER_CELESTRAK=1``. Read-only public GP data (no key) — the gate is the optional
+#: ``sgp4`` propagator (``pip install "aether[orbital]"``): missing ⇒ one ``offline`` status,
+#: never a crash (the GLM/FIRMS stance). ``AETHER_CELESTRAK_BASE_URL=fake`` selects the
+#: no-hardware feeder. The GP service refreshes only ~every 2 h, so the sync cadence default
+#: is a conservative 6 h (§38 rate limit — a tight loop firewalls the IP). Objects are
+#: propagated on a fast cadence and filtered to those above ``min_elevation_deg`` (ORBIT-FR-007).
+DEFAULT_CELESTRAK_BASE_URL = "https://celestrak.org"
+#: Default GP groups: crewed/uncrewed stations, the full active catalog, and amateur-radio
+#: birds. The ``active`` group is large — Pi-heavy at a fast propagate cadence; full
+#: multi-tier cadence (ORBIT-FR-011) is deferred to M6.6 (see docs/orbital-celestrak.md).
+DEFAULT_CELESTRAK_GROUPS = ("stations", "active", "amateur")
+#: Sync no faster than CelesTrak's 2 h refresh; 6 h is safe and gentle (§38).
+DEFAULT_CELESTRAK_SYNC_S = 21600.0
+#: Propagate the synced set on this cadence; 15 s is a smooth-enough track without churn.
+DEFAULT_CELESTRAK_PROPAGATE_S = 15.0
+#: Emit only objects currently above this elevation (deg) over the observer (ORBIT-FR-007).
+DEFAULT_CELESTRAK_MIN_ELEVATION_DEG = 10.0
+#: On-map freshness of a propagated position; it ages off via the live-state expiry sweep so a
+#: stalled adapter does not leave a frozen object. Short — positions are re-emitted each tick.
+DEFAULT_CELESTRAK_VALID_S = 30.0
+DEFAULT_CELESTRAK_TIMEOUT_S = 15.0
+#: Observer altitude above the WGS-84 ellipsoid (metres) for the look-angle origin.
+DEFAULT_CELESTRAK_OBSERVER_ALT_M = 0.0
+
 #: Persistence store (M4, PRD §19). SQLite path; the WAL sidecars (`-wal`/`-shm`)
 #: sit alongside it. Live state never depends on this store (PRD §5), so it is off
 #: by default and a slow/failed disk only backs up the writer's own queue.
@@ -536,6 +561,23 @@ class Settings:
     faa_notam_timeout_s: float = DEFAULT_FAA_NOTAM_TIMEOUT_S
     faa_notam_max_pages_per_poll: int = DEFAULT_FAA_NOTAM_MAX_PAGES_PER_POLL
 
+    #: Run the CelesTrak orbital adapter alongside the backend (M6.5, PRD §11.14). Off by
+    #: default — opt in with ``AETHER_CELESTRAK=1``. Read-only public GP data (no key);
+    #: capability-gated on the optional ``sgp4`` propagator (missing ⇒ ``offline`` status,
+    #: never a crash). ``celestrak_base_url=fake`` selects the no-hardware feeder. The observer
+    #: defaults to the canonical station location; positions are predicted and labelled so.
+    celestrak: bool = False
+    celestrak_base_url: str = DEFAULT_CELESTRAK_BASE_URL
+    celestrak_groups: tuple[str, ...] = DEFAULT_CELESTRAK_GROUPS
+    celestrak_observer_lat: float = DEFAULT_STATION_LAT
+    celestrak_observer_lon: float = DEFAULT_STATION_LON
+    celestrak_observer_alt_m: float = DEFAULT_CELESTRAK_OBSERVER_ALT_M
+    celestrak_min_elevation_deg: float = DEFAULT_CELESTRAK_MIN_ELEVATION_DEG
+    celestrak_sync_s: float = DEFAULT_CELESTRAK_SYNC_S
+    celestrak_propagate_s: float = DEFAULT_CELESTRAK_PROPAGATE_S
+    celestrak_valid_s: float = DEFAULT_CELESTRAK_VALID_S
+    celestrak_timeout_s: float = DEFAULT_CELESTRAK_TIMEOUT_S
+
     #: Persist fused records to SQLite (M4, PRD §19). Off by default — persistence
     #: is a *sibling* bus consumer that never gates serving live state (PRD §5).
     #: Track history is the first consumer; retention/alerts/replay build on the same
@@ -798,6 +840,40 @@ class Settings:
                 os.environ.get(
                     "AETHER_FAA_NOTAM_MAX_PAGES_PER_POLL", DEFAULT_FAA_NOTAM_MAX_PAGES_PER_POLL
                 )
+            ),
+            celestrak=_env_bool("AETHER_CELESTRAK", False),
+            celestrak_base_url=os.environ.get(
+                "AETHER_CELESTRAK_BASE_URL", DEFAULT_CELESTRAK_BASE_URL
+            ),
+            celestrak_groups=tuple(
+                g.strip()
+                for g in os.environ.get(
+                    "AETHER_CELESTRAK_GROUPS", ",".join(DEFAULT_CELESTRAK_GROUPS)
+                ).split(",")
+                if g.strip()
+            )
+            or DEFAULT_CELESTRAK_GROUPS,
+            celestrak_observer_lat=float(os.environ.get("AETHER_CELESTRAK_LAT", station_lat)),
+            celestrak_observer_lon=float(os.environ.get("AETHER_CELESTRAK_LON", station_lon)),
+            celestrak_observer_alt_m=float(
+                os.environ.get("AETHER_CELESTRAK_ALT_M", DEFAULT_CELESTRAK_OBSERVER_ALT_M)
+            ),
+            celestrak_min_elevation_deg=float(
+                os.environ.get(
+                    "AETHER_CELESTRAK_MIN_ELEVATION_DEG", DEFAULT_CELESTRAK_MIN_ELEVATION_DEG
+                )
+            ),
+            celestrak_sync_s=float(
+                os.environ.get("AETHER_CELESTRAK_SYNC_S", DEFAULT_CELESTRAK_SYNC_S)
+            ),
+            celestrak_propagate_s=float(
+                os.environ.get("AETHER_CELESTRAK_PROPAGATE_S", DEFAULT_CELESTRAK_PROPAGATE_S)
+            ),
+            celestrak_valid_s=float(
+                os.environ.get("AETHER_CELESTRAK_VALID_S", DEFAULT_CELESTRAK_VALID_S)
+            ),
+            celestrak_timeout_s=float(
+                os.environ.get("AETHER_CELESTRAK_TIMEOUT_S", DEFAULT_CELESTRAK_TIMEOUT_S)
             ),
             persist=_env_bool("AETHER_PERSIST", False),
             db_path=os.environ.get("AETHER_DB_PATH", DEFAULT_DB_PATH),
