@@ -227,6 +227,20 @@ DEFAULT_FAA_TFR_RADIUS_NM = 500.0
 #: Per-poll detail-fetch budget (politeness + catch-up bound).
 DEFAULT_FAA_TFR_MAX_DETAILS_PER_POLL = 60
 
+#: FAA NOTAM API (M6.4, PRD §11.13/§18.11). Capability-gated (AIRSPACE-FR-008): the API
+#: needs operator-supplied ``client_id``/``client_secret``. ``fake`` (base or either
+#: credential) selects the no-hardware feeder. The ``locationRadius`` query is capped at
+#: the FAA-documented 100 NM maximum, so the default query radius is that cap (the wider
+#: AOI is honored by the geometry, not the point query).
+DEFAULT_FAA_NOTAM_BASE_URL = "https://external-api.faa.gov"
+DEFAULT_FAA_NOTAM_RADIUS_NM = 100.0
+#: NOTAMs change on the order of minutes-to-hours; a 5-minute poll keeps the map fresh.
+DEFAULT_FAA_NOTAM_POLL_S = 300.0
+DEFAULT_FAA_NOTAM_TIMEOUT_S = 15.0
+#: Page size requested (FAA max is 1000); paginated up to the per-poll page budget.
+DEFAULT_FAA_NOTAM_PAGE_SIZE = 50
+DEFAULT_FAA_NOTAM_MAX_PAGES_PER_POLL = 5
+
 #: Persistence store (M4, PRD §19). SQLite path; the WAL sidecars (`-wal`/`-shm`)
 #: sit alongside it. Live state never depends on this store (PRD §5), so it is off
 #: by default and a slow/failed disk only backs up the writer's own queue.
@@ -504,6 +518,24 @@ class Settings:
     faa_tfr_max_details_per_poll: int = DEFAULT_FAA_TFR_MAX_DETAILS_PER_POLL
     faa_tfr_states: tuple[str, ...] = ()
 
+    #: FAA NOTAM airspace overlay (M6.4, PRD §11.13/§18.11). Off by default and
+    #: capability-gated (AIRSPACE-FR-008): the FAA API needs operator-supplied
+    #: ``client_id``/``client_secret``. Missing creds → one ``disabled`` status, never a
+    #: crash; a 401/403 → one ``offline`` status. ``faa_notam_base_url=fake`` (or either
+    #: credential = ``fake``) selects the no-hardware feeder. The query radius is capped at
+    #: the FAA 100 NM maximum; the AOI center defaults to the station.
+    faa_notam: bool = False
+    faa_notam_base_url: str = DEFAULT_FAA_NOTAM_BASE_URL
+    faa_notam_client_id: str = ""
+    faa_notam_client_secret: str = ""
+    faa_notam_center_lat: float = DEFAULT_STATION_LAT
+    faa_notam_center_lon: float = DEFAULT_STATION_LON
+    faa_notam_radius_nm: float = DEFAULT_FAA_NOTAM_RADIUS_NM
+    faa_notam_page_size: int = DEFAULT_FAA_NOTAM_PAGE_SIZE
+    faa_notam_poll_s: float = DEFAULT_FAA_NOTAM_POLL_S
+    faa_notam_timeout_s: float = DEFAULT_FAA_NOTAM_TIMEOUT_S
+    faa_notam_max_pages_per_poll: int = DEFAULT_FAA_NOTAM_MAX_PAGES_PER_POLL
+
     #: Persist fused records to SQLite (M4, PRD §19). Off by default — persistence
     #: is a *sibling* bus consumer that never gates serving live state (PRD §5).
     #: Track history is the first consumer; retention/alerts/replay build on the same
@@ -741,6 +773,31 @@ class Settings:
                 s.strip().upper()
                 for s in os.environ.get("AETHER_FAA_TFR_STATES", "").split(",")
                 if s.strip()
+            ),
+            faa_notam=_env_bool("AETHER_FAA_NOTAM", False),
+            faa_notam_base_url=os.environ.get(
+                "AETHER_FAA_NOTAM_BASE_URL", DEFAULT_FAA_NOTAM_BASE_URL
+            ),
+            faa_notam_client_id=os.environ.get("AETHER_FAA_NOTAM_CLIENT_ID", ""),
+            faa_notam_client_secret=os.environ.get("AETHER_FAA_NOTAM_CLIENT_SECRET", ""),
+            faa_notam_center_lat=float(os.environ.get("AETHER_FAA_NOTAM_LAT", station_lat)),
+            faa_notam_center_lon=float(os.environ.get("AETHER_FAA_NOTAM_LON", station_lon)),
+            faa_notam_radius_nm=float(
+                os.environ.get("AETHER_FAA_NOTAM_RADIUS_NM", DEFAULT_FAA_NOTAM_RADIUS_NM)
+            ),
+            faa_notam_page_size=int(
+                os.environ.get("AETHER_FAA_NOTAM_PAGE_SIZE", DEFAULT_FAA_NOTAM_PAGE_SIZE)
+            ),
+            faa_notam_poll_s=float(
+                os.environ.get("AETHER_FAA_NOTAM_POLL_S", DEFAULT_FAA_NOTAM_POLL_S)
+            ),
+            faa_notam_timeout_s=float(
+                os.environ.get("AETHER_FAA_NOTAM_TIMEOUT_S", DEFAULT_FAA_NOTAM_TIMEOUT_S)
+            ),
+            faa_notam_max_pages_per_poll=int(
+                os.environ.get(
+                    "AETHER_FAA_NOTAM_MAX_PAGES_PER_POLL", DEFAULT_FAA_NOTAM_MAX_PAGES_PER_POLL
+                )
             ),
             persist=_env_bool("AETHER_PERSIST", False),
             db_path=os.environ.get("AETHER_DB_PATH", DEFAULT_DB_PATH),
