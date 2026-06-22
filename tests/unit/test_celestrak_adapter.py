@@ -30,6 +30,13 @@ from aether.config import Settings
 from aether.orbital.sgp4_propagate import Sgp4Unavailable
 from aether.schema.records import SCHEMA_VERSION, SourceStatusRecord, TrackRecord
 
+# The feeder-driven tests below run the REAL SGP4 propagate path, so this whole module needs
+# the optional ``[orbital]`` extra. Skip cleanly when ``sgp4`` is absent (mirrors the GLM/
+# ``netCDF4`` pattern) instead of hanging in ``_drive`` waiting on statuses that never arrive
+# because every object fails to propagate. CI installs ``[orbital]`` so this runs there. The
+# aether imports above are safe without sgp4 — the adapter imports it lazily, behind the gate.
+pytest.importorskip("sgp4")
+
 # Observer for the canned roster: the overhead GEO is solved to sit here.
 OBS_LAT, OBS_LON = 30.0, -97.0
 NOW = datetime(2026, 6, 21, 18, 0, 0, tzinfo=UTC)
