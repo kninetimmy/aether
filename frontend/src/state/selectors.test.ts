@@ -10,6 +10,8 @@ import {
   matchesLiveLocal,
   matchesMilitary,
   matchesMilitaryBasis,
+  matchesOrbitalCategory,
+  matchesOrbitalElevation,
   isOnWatchlist,
   matchesProvenance,
   matchesSource,
@@ -365,6 +367,88 @@ describe("matchesAprsCallsign (substring on track.label)", () => {
     const noLabel = track("x", true, { label: null });
     expect(() => matchesAprsCallsign(noLabel, f({ aprsCallsignLike: "x" }))).not.toThrow();
     expect(matchesAprsCallsign(noLabel, f({ aprsCallsignLike: "x" }))).toBe(false);
+  });
+});
+
+describe("matchesOrbitalCategory / matchesOrbitalElevation (M6.6a)", () => {
+  const sat = (over: Partial<TrackRecord> = {}) =>
+    track("sat", false, {
+      track_type: "orbital_object",
+      source: "celestrak",
+      ...over,
+    });
+  const plane = track("plane", true, { track_type: "aircraft" });
+
+  it("null filter is a no-op for both predicates", () => {
+    expect(matchesOrbitalCategory(sat({ attributes: { group: "starlink" } }), f())).toBe(
+      true,
+    );
+    expect(matchesOrbitalElevation(sat({ attributes: { elevation_deg: 5 } }), f())).toBe(
+      true,
+    );
+  });
+
+  it("KEY REGRESSION GUARD: a non-orbital track ALWAYS passes even when the filter is set", () => {
+    // Selecting an orbital category / elevation floor must never hide aircraft.
+    const catActive = f({ orbitalCategory: new Set(["stations"]) });
+    const elevActive = f({ orbitalMinElevationDeg: 45 });
+    expect(matchesOrbitalCategory(plane, catActive)).toBe(true);
+    expect(matchesOrbitalElevation(plane, elevActive)).toBe(true);
+    // A vessel with no orbital attributes at all also passes both.
+    const ship = track("ship", false, { track_type: "vessel", attributes: {} });
+    expect(matchesOrbitalCategory(ship, catActive)).toBe(true);
+    expect(matchesOrbitalElevation(ship, elevActive)).toBe(true);
+  });
+
+  it("filters orbital_object tracks by group membership", () => {
+    const active = f({ orbitalCategory: new Set(["stations", "gps-ops"]) });
+    expect(matchesOrbitalCategory(sat({ attributes: { group: "stations" } }), active)).toBe(
+      true,
+    );
+    expect(matchesOrbitalCategory(sat({ attributes: { group: "starlink" } }), active)).toBe(
+      false,
+    );
+    // active criterion, missing/non-string group → unknown → no-match, never throws
+    expect(() => matchesOrbitalCategory(sat({ attributes: {} }), active)).not.toThrow();
+    expect(matchesOrbitalCategory(sat({ attributes: {} }), active)).toBe(false);
+    expect(matchesOrbitalCategory(sat({ attributes: { group: 7 } }), active)).toBe(false);
+  });
+
+  it("filters orbital_object tracks by elevation with inclusive >=", () => {
+    const active = f({ orbitalMinElevationDeg: 30 });
+    expect(matchesOrbitalElevation(sat({ attributes: { elevation_deg: 45 } }), active)).toBe(
+      true,
+    );
+    expect(matchesOrbitalElevation(sat({ attributes: { elevation_deg: 30 } }), active)).toBe(
+      true,
+    ); // inclusive boundary
+    expect(matchesOrbitalElevation(sat({ attributes: { elevation_deg: 10 } }), active)).toBe(
+      false,
+    );
+    // active criterion, missing/non-numeric elevation → unknown → no-match (excluded)
+    expect(() => matchesOrbitalElevation(sat({ attributes: {} }), active)).not.toThrow();
+    expect(matchesOrbitalElevation(sat({ attributes: {} }), active)).toBe(false);
+    expect(
+      matchesOrbitalElevation(sat({ attributes: { elevation_deg: "x" } }), active),
+    ).toBe(false);
+  });
+
+  it("composes in visibleTracks WITHOUT hiding non-orbital tracks", () => {
+    const mixed = new Map<string, TrackRecord>([
+      ["plane", plane],
+      ["hi", sat({ id: "hi", attributes: { group: "stations", elevation_deg: 60 } })],
+      ["lo", sat({ id: "lo", attributes: { group: "stations", elevation_deg: 5 } })],
+    ]);
+    // mixed Map stores by id; rebuild with proper keys
+    const m = new Map<string, TrackRecord>();
+    for (const t of mixed.values()) m.set(t.id, t);
+    const out = visibleTracks(
+      m,
+      f({ orbitalCategory: new Set(["stations"]), orbitalMinElevationDeg: 30 }),
+      ctx(),
+    );
+    // aircraft survives (predicates no-op it); only the high-elevation sat passes
+    expect(out.map((t) => t.id).sort()).toEqual(["hi", "plane"]);
   });
 });
 

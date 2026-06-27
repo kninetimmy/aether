@@ -57,6 +57,19 @@ export interface DisplayFilters {
   ais: AisFilters;
   aprsCallsignLike: string | null;
   watchlistOnly: boolean;
+  /**
+   * Orbital category (CelesTrak GP group, e.g. "stations"/"starlink"). null =
+   * no-op; a Set keeps only orbital_object tracks whose attributes.group is a
+   * member. NON-orbital tracks always pass (see matchesOrbitalCategory).
+   */
+  orbitalCategory: Set<string> | null;
+  /**
+   * Minimum elevation (deg above the horizon) for orbital_object tracks. null =
+   * no-op. NARROWS within the backend-transmitted set (>= inclusive); it can
+   * never reveal objects below the station's configured emission floor, since
+   * those are not sent. Non-orbital tracks always pass.
+   */
+  orbitalMinElevationDeg: number | null;
 }
 
 /** Default = all-null / any: an exact no-op (first load behaves like today). */
@@ -83,6 +96,44 @@ export function defaultFilters(): DisplayFilters {
     },
     aprsCallsignLike: null,
     watchlistOnly: false,
+    orbitalCategory: null,
+    orbitalMinElevationDeg: null,
+  };
+}
+
+/**
+ * Runtime orbital config from /api/config (M6.6a). `enabled` gates whether the
+ * UI renders the orbital filter controls at all; `groups` populates the category
+ * chips; `minElevationDeg` is the BACKEND emission floor (display-only helper
+ * text — the client narrows within, never below, it). null until fetched.
+ */
+export interface OrbitalConfig {
+  enabled: boolean;
+  groups: string[];
+  minElevationDeg: number;
+}
+
+/** Raw `/api/config` orbital block (snake_case wire shape). */
+export interface OrbitalConfigApi {
+  enabled: boolean;
+  groups: string[];
+  min_elevation_deg: number;
+}
+
+/**
+ * Map the raw `/api/config` orbital block to {@link OrbitalConfig}, or null when
+ * the block is absent (older backend / failed fetch) so the controls stay off
+ * (PRD §37 graceful degradation). Pure — kept here so the snake_case→camelCase
+ * contract is unit-testable without mounting the (MapLibre) App.
+ */
+export function orbitalConfigFromApi(
+  orbital: OrbitalConfigApi | null | undefined,
+): OrbitalConfig | null {
+  if (!orbital) return null;
+  return {
+    enabled: orbital.enabled,
+    groups: orbital.groups,
+    minElevationDeg: orbital.min_elevation_deg,
   };
 }
 
@@ -147,6 +198,12 @@ export interface AppState {
    */
   stationCenter: { lon: number; lat: number } | null;
   /**
+   * Runtime orbital config from /api/config (M6.6a); null until fetched. When
+   * unset or `enabled:false` the FilterPanel omits the orbital controls entirely.
+   * Carries no secrets / no coordinates (the contract is groups + emission floor).
+   */
+  orbitalConfig: OrbitalConfig | null;
+  /**
    * Wall clock (ms) bumped by a 1s tick so the age + live-LOCAL filters
    * re-evaluate and the filtered set doesn't silently drift between frames.
    */
@@ -166,6 +223,7 @@ export interface AppState {
   setFilters: (patch: Partial<DisplayFilters>) => void;
   resetFilters: () => void;
   setStationCenter: (center: { lon: number; lat: number } | null) => void;
+  setOrbitalConfig: (config: OrbitalConfig | null) => void;
   tickClock: () => void;
   /** Add/remove a stable watchlist key (write-through to localStorage). */
   toggleWatchlist: (key: string) => void;
@@ -215,6 +273,7 @@ export const useStore = create<AppState>((set, get) => ({
   toiMeta: new Map(),
   selectedTrackId: null,
   stationCenter: null,
+  orbitalConfig: null,
   clock: Date.now(),
   replay: emptyReplay(),
   client: null,
@@ -251,6 +310,8 @@ export const useStore = create<AppState>((set, get) => ({
   resetFilters: () => set({ filters: defaultFilters() }),
 
   setStationCenter: (stationCenter) => set({ stationCenter }),
+
+  setOrbitalConfig: (orbitalConfig) => set({ orbitalConfig }),
 
   tickClock: () => set({ clock: Date.now() }),
 

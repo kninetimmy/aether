@@ -272,7 +272,17 @@ def create_app(*, settings: Settings | None = None, demo_interval_s: float = 1.0
                 }
                 if configured
                 else None
-            )
+            ),
+            # Orbital controls descriptor (M6.6a). ALWAYS present (``enabled: false`` when
+            # the CelesTrak adapter is off) so the client can decide whether to render the
+            # orbital filter UI. ``min_elevation_deg`` is the BACKEND emission floor: the UI
+            # can only narrow within the transmitted set, never reveal objects below it
+            # (ORBIT-FR-007). Carries no secrets/coordinates beyond ``station`` above.
+            "orbital": {
+                "enabled": cfg.celestrak,
+                "groups": list(cfg.celestrak_groups),
+                "min_elevation_deg": cfg.celestrak_min_elevation_deg,
+            },
         }
 
     @app.get("/api/v2/tracks/{track_id}")
