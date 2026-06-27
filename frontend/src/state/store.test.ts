@@ -86,3 +86,48 @@ describe("watchlist localStorage hydrate / write-through", () => {
     expect(useStore.getState().selectedTrackId).toBeNull();
   });
 });
+
+// Orbital runtime config + filter defaults (M6.6a).
+describe("orbital config (M6.6a)", () => {
+  it("orbitalConfigFromApi maps snake_case → camelCase", async () => {
+    const { orbitalConfigFromApi } = await import("./store");
+    expect(
+      orbitalConfigFromApi({
+        enabled: true,
+        groups: ["stations", "amateur"],
+        min_elevation_deg: 10,
+      }),
+    ).toEqual({ enabled: true, groups: ["stations", "amateur"], minElevationDeg: 10 });
+  });
+
+  it("orbitalConfigFromApi degrades to null when the block is absent", async () => {
+    const { orbitalConfigFromApi } = await import("./store");
+    expect(orbitalConfigFromApi(null)).toBeNull();
+    expect(orbitalConfigFromApi(undefined)).toBeNull();
+  });
+
+  it("setOrbitalConfig sets then clears the runtime config", async () => {
+    const useStore = await freshStore();
+    expect(useStore.getState().orbitalConfig).toBeNull();
+    useStore.getState().setOrbitalConfig({
+      enabled: true,
+      groups: ["stations"],
+      minElevationDeg: 10,
+    });
+    expect(useStore.getState().orbitalConfig?.enabled).toBe(true);
+    useStore.getState().setOrbitalConfig(null);
+    expect(useStore.getState().orbitalConfig).toBeNull();
+  });
+
+  it("resetFilters restores the orbital filter defaults to null", async () => {
+    const useStore = await freshStore();
+    useStore.getState().setFilters({
+      orbitalCategory: new Set(["stations"]),
+      orbitalMinElevationDeg: 30,
+    });
+    expect(useStore.getState().filters.orbitalMinElevationDeg).toBe(30);
+    useStore.getState().resetFilters();
+    expect(useStore.getState().filters.orbitalCategory).toBeNull();
+    expect(useStore.getState().filters.orbitalMinElevationDeg).toBeNull();
+  });
+});

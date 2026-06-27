@@ -14,13 +14,14 @@ import { TOIDetailsPanel } from "../features/toi/TOIDetailsPanel";
 import { TrackList } from "../features/tracks/TrackList";
 import { ReplayLauncher } from "../features/replay/ReplayLauncher";
 import { ReplayTimeline } from "../features/replay/ReplayTimeline";
-import { useStore } from "../state/store";
+import { useStore, orbitalConfigFromApi, type OrbitalConfigApi } from "../state/store";
 
 export function App() {
   const connect = useStore((s) => s.connect);
   const disconnect = useStore((s) => s.disconnect);
   const tickClock = useStore((s) => s.tickClock);
   const setStationCenter = useStore((s) => s.setStationCenter);
+  const setOrbitalConfig = useStore((s) => s.setOrbitalConfig);
   const ageMaxS = useStore((s) => s.filters.ageMaxS);
   const stale = useStore((s) => s.live.stale);
   const seq = useStore((s) => s.live.seq);
@@ -47,12 +48,24 @@ export function App() {
     let cancelled = false;
     fetch("/api/config")
       .then((r) => (r.ok ? r.json() : null))
-      .then((cfg: { station: { lon: number; lat: number } | null } | null) => {
-        if (cancelled || !cfg) return;
-        setStationCenter(
-          cfg.station ? { lon: cfg.station.lon, lat: cfg.station.lat } : null,
-        );
-      })
+      .then(
+        (
+          cfg:
+            | {
+                station: { lon: number; lat: number } | null;
+                orbital?: OrbitalConfigApi;
+              }
+            | null,
+        ) => {
+          if (cancelled || !cfg) return;
+          setStationCenter(
+            cfg.station ? { lon: cfg.station.lon, lat: cfg.station.lat } : null,
+          );
+          // The orbital block is always present per the /api/config contract, but
+          // tolerate an older backend (block absent) by leaving the controls off.
+          setOrbitalConfig(orbitalConfigFromApi(cfg.orbital));
+        },
+      )
       .catch(() => {
         // A missing/failed config endpoint must not break the app: leave the
         // range filter disabled (PRD §37 graceful degradation).
@@ -60,7 +73,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [setStationCenter]);
+  }, [setStationCenter, setOrbitalConfig]);
 
   // Drive a 1s store clock tick ONLY while the age filter is active, so the
   // now−observed_at cutoff doesn't silently drift between WS frames. The

@@ -247,6 +247,42 @@ export function matchesAprsCallsign(
   return substringMatch(track.label ?? undefined, filters.aprsCallsignLike);
 }
 
+// --- Orbital (M6.6a) ------------------------------------------------------
+// CelesTrak GP objects are propagated to predicted orbital_object tracks (M6.5);
+// these two predicates let the operator narrow that overlay WITHIN the backend-
+// transmitted set. The cardinal rule: BOTH predicates are no-ops for every
+// non-orbital track — selecting a category or elevation floor must NEVER hide an
+// aircraft/vessel/APRS target. As with every active criterion (PRD §37), an
+// orbital track with a missing/wrong-typed attribute reads as "unknown" → no-match.
+
+/** Defensive number attribute read; undefined when absent or not a finite number. */
+function numAttr(track: TrackRecord, key: string): number | undefined {
+  const raw = track.attributes?.[key];
+  return typeof raw === "number" && Number.isFinite(raw) ? raw : undefined;
+}
+
+export function matchesOrbitalCategory(
+  track: TrackRecord,
+  filters: DisplayFilters,
+): boolean {
+  if (filters.orbitalCategory === null) return true; // inactive → no-op
+  if (track.track_type !== "orbital_object") return true; // non-orbital always passes
+  const group = strAttr(track, "group");
+  if (group === undefined) return false; // active, unknown group → no-match
+  return filters.orbitalCategory.has(group);
+}
+
+export function matchesOrbitalElevation(
+  track: TrackRecord,
+  filters: DisplayFilters,
+): boolean {
+  if (filters.orbitalMinElevationDeg === null) return true; // inactive → no-op
+  if (track.track_type !== "orbital_object") return true; // non-orbital always passes
+  const elev = numAttr(track, "elevation_deg");
+  if (elev === undefined) return false; // active, unknown elevation → no-match
+  return elev >= filters.orbitalMinElevationDeg; // inclusive
+}
+
 // --- Watchlist (TOI; M3.6c) -----------------------------------------------
 // STABLE keying is the whole point: the raw track.id is source-prefixed and
 // ephemeral (it changes on a LOCAL→NET fusion handoff and can differ across a
@@ -340,6 +376,8 @@ export function visibleTracks(
       matchesAisMmsi(track, filters) &&
       matchesAisDestination(track, filters) &&
       matchesAprsCallsign(track, filters) &&
+      matchesOrbitalCategory(track, filters) &&
+      matchesOrbitalElevation(track, filters) &&
       matchesWatchlist(track, filters, ctx)
     ) {
       out.push(track);

@@ -50,6 +50,7 @@ export function FilterPanel() {
   const setFilters = useStore((s) => s.setFilters);
   const resetFilters = useStore((s) => s.resetFilters);
   const stationCenter = useStore((s) => s.stationCenter);
+  const orbitalConfig = useStore((s) => s.orbitalConfig);
 
   const sources = useMemo(() => activeSources(tracks), [tracks]);
   const trackTypes = useMemo(() => activeTrackTypes(tracks), [tracks]);
@@ -72,6 +73,15 @@ export function FilterPanel() {
           onChange={(e) => setFilters({ liveLocalOnly: e.target.checked })}
         />
         <span>Live LOCAL only</span>
+      </label>
+
+      <label className="filter-row">
+        <input
+          type="checkbox"
+          checked={filters.watchlistOnly}
+          onChange={(e) => setFilters({ watchlistOnly: e.target.checked })}
+        />
+        <span>Watchlist only</span>
       </label>
 
       <fieldset className="filter-group" aria-label="Track types">
@@ -256,6 +266,47 @@ export function FilterPanel() {
           onChange={(e) => setFilters({ aprsCallsignLike: strOrNull(e.target.value) })}
         />
       </fieldset>
+
+      {/* Orbital controls render ONLY when the backend orbital adapter is on
+          (from /api/config). They narrow WITHIN the transmitted set; they can
+          never reveal objects below the station's configured emission floor. */}
+      {orbitalConfig?.enabled && (
+        <fieldset className="filter-group" aria-label="Orbital">
+          <legend>Orbital</legend>
+          {orbitalConfig.groups.length === 0 && <p className="muted">no groups</p>}
+          {orbitalConfig.groups.map((group) => (
+            <label key={group} className="filter-chip">
+              <input
+                type="checkbox"
+                checked={filters.orbitalCategory?.has(group) ?? false}
+                onChange={() =>
+                  setFilters({
+                    orbitalCategory: toggleInSet(filters.orbitalCategory, group),
+                  })
+                }
+              />
+              <span>{group}</span>
+            </label>
+          ))}
+          <label className="filter-row">
+            <span>Min elevation (deg)</span>
+            <input
+              type="number"
+              min={orbitalConfig.minElevationDeg}
+              max={90}
+              placeholder={`>= ${orbitalConfig.minElevationDeg}`}
+              value={filters.orbitalMinElevationDeg ?? ""}
+              onChange={(e) =>
+                setFilters({ orbitalMinElevationDeg: numOrNull(e.target.value) })
+              }
+            />
+          </label>
+          <p className="muted">
+            Narrows within the transmitted set; cannot reveal objects below the
+            station floor ({orbitalConfig.minElevationDeg}&deg;).
+          </p>
+        </fieldset>
+      )}
     </section>
   );
 }
