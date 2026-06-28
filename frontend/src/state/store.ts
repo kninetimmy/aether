@@ -6,6 +6,11 @@
 import { create } from "zustand";
 import { WsClient, type ConnectionStatus } from "../api/wsClient";
 import { createReplaySession, deleteReplaySession } from "../api/replayClient";
+import {
+  listWatchlist,
+  putWatchlistEntry,
+  deleteWatchlistEntry,
+} from "../api/watchlistClient";
 import { emptyState, type LiveState } from "./liveState";
 import {
   clampCursor,
@@ -139,19 +144,22 @@ export function orbitalConfigFromApi(
 
 /**
  * Per-target operator annotation for a watchlisted TOI (PRD §24.6 label/priority).
- * localStorage-only in M3.6 — server CRUD + the SQLite `watchlist` table are
- * deferred to M4.
+ * Backend-authoritative since M6.6b: `hydrateWatchlist` populates this from the
+ * server `/api/v2/watchlist` entries. (Write-through for meta edits lands with the
+ * meta-editing UI; membership toggles already write through.)
  */
 export interface ToiMeta {
   label?: string;
   priority?: number;
 }
 
-// localStorage key for the persisted watchlist (stable keys, JSON array). The
-// `.v1` suffix lets a future schema change migrate without colliding (PRD §24.6).
+// localStorage key for the watchlist CACHE (stable keys, JSON array). Since M6.6b the
+// backend store is authoritative; this cache only powers instant first paint and
+// offline tolerance, and is refreshed to match the server on every successful hydrate.
+// The `.v1` suffix lets a future schema change migrate without colliding (PRD §24.6).
 const WATCHLIST_KEY = "aether.toi.watchlist.v1";
 
-/** Hydrate the watchlist Set from localStorage; tolerant of any malformed blob. */
+/** Hydrate the watchlist Set from the localStorage cache; tolerant of any malformed blob. */
 function loadWatchlist(): Set<string> {
   try {
     const raw = globalThis.localStorage?.getItem(WATCHLIST_KEY);
@@ -225,9 +233,21 @@ export interface AppState {
   setStationCenter: (center: { lon: number; lat: number } | null) => void;
   setOrbitalConfig: (config: OrbitalConfig | null) => void;
   tickClock: () => void;
-  /** Add/remove a stable watchlist key (write-through to localStorage). */
+  /**
+   * Reconcile the watchlist with the backend (M6.6b, PRD §21.5). Fetches the
+   * authoritative server entries, replaces the local Set + toiMeta, and refreshes
+   * the localStorage cache. On failure (503/transport) it keeps the cache so the
+   * watchlist is never silently wiped — offline tolerance (PRD §37).
+   */
+  hydrateWatchlist: () => Promise<void>;
+  /**
+   * Add/remove a stable watchlist key. Optimistic: updates the local Set + cache
+   * immediately, then writes through (PUT add / DELETE remove) to the authoritative
+   * backend best-effort. A write failure leaves the optimistic state in place; the
+   * next hydrate reconciles.
+   */
   toggleWatchlist: (key: string) => void;
-  /** Remove a stable watchlist key (write-through to localStorage). */
+  /** Remove a stable watchlist key (optimistic local + cache, DELETE write-through). */
   removeFromWatchlist: (key: string) => void;
   /** Shallow-merge label/priority annotation for a TOI key (PRD §24.6). */
   setToiMeta: (key: string, patch: ToiMeta) => void;
@@ -315,25 +335,55 @@ export const useStore = create<AppState>((set, get) => ({
 
   tickClock: () => set({ clock: Date.now() }),
 
-  // Watchlist mutators write a NEW Set (Zustand identity change → re-render) and
-  // write-through to localStorage. Keys are stable watchlistKeys, never raw ids.
-  toggleWatchlist: (key) =>
+  // Reconcile with the backend-authoritative store: server entries replace the local
+  // Set + toiMeta and refresh the cache. A failure (persistence off / transport) keeps
+  // the localStorage cache rather than wiping the watchlist (PRD §37).
+  hydrateWatchlist: async () => {
+    let entries;
+    try {
+      entries = await listWatchlist();
+    } catch {
+      return; // keep the localStorage-hydrated cache
+    }
+    const watchlist = new Set(entries.map((e) => e.key));
+    const toiMeta = new Map<string, ToiMeta>();
+    for (const e of entries) {
+      const meta: ToiMeta = {};
+      if (e.label != null) meta.label = e.label;
+      if (e.priority != null) meta.priority = e.priority;
+      if (meta.label !== undefined || meta.priority !== undefined) toiMeta.set(e.key, meta);
+    }
+    saveWatchlist(watchlist); // refresh the cache to match the authoritative set
+    set({ watchlist, toiMeta });
+  },
+
+  // Watchlist mutators write a NEW Set (Zustand identity change → re-render), refresh
+  // the localStorage cache, and write through to the backend best-effort. Keys are
+  // stable watchlistKeys, never raw ids. The add/remove decision is read from current
+  // state BEFORE the pure set() updater, so the side-effecting API call stays outside it.
+  toggleWatchlist: (key) => {
+    const adding = !get().watchlist.has(key);
     set((s) => {
       const watchlist = new Set(s.watchlist);
-      if (watchlist.has(key)) watchlist.delete(key);
-      else watchlist.add(key);
+      if (adding) watchlist.add(key);
+      else watchlist.delete(key);
       saveWatchlist(watchlist);
       return { watchlist };
-    }),
+    });
+    // Best-effort write-through; a failure leaves the optimistic local state + cache.
+    void (adding ? putWatchlistEntry(key) : deleteWatchlistEntry(key)).catch(() => {});
+  },
 
-  removeFromWatchlist: (key) =>
+  removeFromWatchlist: (key) => {
+    if (!get().watchlist.has(key)) return;
     set((s) => {
-      if (!s.watchlist.has(key)) return {};
       const watchlist = new Set(s.watchlist);
       watchlist.delete(key);
       saveWatchlist(watchlist);
       return { watchlist };
-    }),
+    });
+    void deleteWatchlistEntry(key).catch(() => {});
+  },
 
   setToiMeta: (key, patch) =>
     set((s) => {

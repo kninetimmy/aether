@@ -288,6 +288,20 @@ class AlertEngine:
         """Drop one geofence (after a successful delete)."""
         self._contextual.remove_geofence(geofence_id)
 
+    # -- watchlist sync (mirrors the geofence sync; feeds the watchlist operator) --
+
+    def set_watchlist(self, keys: Iterable[str]) -> None:
+        """Replace the whole watchlist membership set (startup load from the store)."""
+        self._contextual.set_watchlist(keys)
+
+    def upsert_watchlist(self, key: str) -> None:
+        """Add one key to the membership set (after a successful PUT/PATCH)."""
+        self._contextual.upsert_watchlist(key)
+
+    def remove_watchlist(self, key: str) -> None:
+        """Drop one key from the membership set (after a successful DELETE)."""
+        self._contextual.remove_watchlist(key)
+
     @property
     def rule_count(self) -> int:
         return len(self._rules)

@@ -98,6 +98,29 @@ MIGRATIONS: tuple[Migration, ...] = (
             "CREATE INDEX ix_alert_rules_created ON alert_rules (created_at)",
         ),
     ),
+    Migration(
+        version=4,
+        name="watchlist",
+        statements=(
+            # Operator tracks-of-interest (PRD §24.6, §21.5). Low-volume CRUD config like
+            # geofences/alert_rules, distinct from the high-rate observation stream. The
+            # PRIMARY KEY is the canonical client-minted identity key (watchlist_key);
+            # ``payload`` holds the full WatchlistEntry JSON (authoritative), the flattened
+            # columns back listing/ordering without parsing every row.
+            """
+            CREATE TABLE watchlist (
+                key         TEXT    PRIMARY KEY,
+                label       TEXT,
+                priority    INTEGER,
+                notes       TEXT,
+                created_at  TEXT    NOT NULL,
+                updated_at  TEXT    NOT NULL,
+                payload     TEXT    NOT NULL
+            )
+            """,
+            "CREATE INDEX ix_watchlist_created ON watchlist (created_at)",
+        ),
+    ),
 )
 
 

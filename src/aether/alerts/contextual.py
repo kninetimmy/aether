@@ -31,6 +31,7 @@ from aether.alerts.conditions import (
     evaluate_leaf,
     resolve_field,
 )
+from aether.alerts.identity import watchlist_key
 from aether.schema.alert_rule import AlertCondition, AlertRule
 from aether.schema.geofence import Geofence
 from aether.schema.geometry import MultiPolygon, Point, Polygon, Position
@@ -143,6 +144,7 @@ class ContextualEvaluator:
         self._station = station
         self._geofences: dict[str, Geofence] = {}
         self._refs: dict[str, Position] = {}  # cached reference points (distance_*)
+        self._watchlist: set[str] = set()  # canonical watchlist membership set
         # LRU-ordered so the rare overflow eviction drops the least-recently-touched
         # subject (see _MAX_SUBJECT_STATES); the precise prunes below keep it small in
         # practice and this is only a runaway backstop.
@@ -164,6 +166,20 @@ class ContextualEvaluator:
         """Drop one geofence and its cached reference point (after a delete)."""
         self._geofences.pop(geofence_id, None)
         self._refs.pop(geofence_id, None)
+
+    # -- watchlist sync (mirrors the geofence sync; feeds the watchlist operator) --
+
+    def set_watchlist(self, keys: Iterable[str]) -> None:
+        """Replace the whole watchlist membership set (startup load)."""
+        self._watchlist = set(keys)
+
+    def upsert_watchlist(self, key: str) -> None:
+        """Add one key to the membership set (after a successful PUT/PATCH)."""
+        self._watchlist.add(key)
+
+    def remove_watchlist(self, key: str) -> None:
+        """Drop one key from the membership set (after a successful DELETE)."""
+        self._watchlist.discard(key)
 
     # -- state pruning (lockstep with the engine's firing map) --
 
@@ -237,6 +253,8 @@ class ContextualEvaluator:
                 elif op in _CHANGED_OPERATORS:
                     discrete = True
                     ok = self._eval_changed(cond, state, dump, first_obs)
+                elif op == "watchlist":
+                    ok = self._eval_watchlist(cond, record)  # always evaluable (pure level)
                 elif op == "became_active":
                     ok, ev = self._eval_became_active(record, now)
                     evaluable = evaluable and ev
@@ -447,6 +465,27 @@ class ContextualEvaluator:
         angle = geo.elevation_angle_deg(ground, alt_m)
         threshold = cond.threshold if cond.threshold is not None else 0.0
         return angle >= threshold, True
+
+    def _eval_watchlist(self, cond: AlertCondition, record: Record) -> bool:
+        """Watchlist membership level for the ``watchlist`` operator.
+
+        Computes the canonical ``watchlist_key`` for ``record`` and checks it against
+        the in-memory membership set.  Always evaluable (membership is always answerable
+        — the key is either present or not); never touches the store on the hot path.
+
+        ``value`` semantics (mirroring ``local_rf``): omitted/``None`` → desired True
+        (the common "is on the watchlist" rule); explicit ``True`` → same; explicit
+        ``False`` → matches a record NOT on the watchlist.
+
+        The leaf's ``field`` (required min_length≥1; convention: set to ``"watchlist"``)
+        is intentionally IGNORED — membership is identity-derived, not a record field.
+        Non-track records return ``None`` from ``watchlist_key`` and are never members,
+        so a ``watchlist:true`` leaf is False for features/events (consistent).
+        """
+        key = watchlist_key(record)
+        is_member = key is not None and key in self._watchlist
+        desired = True if cond.value is None else bool(cond.value)
+        return is_member == desired
 
     def _commit_changed(self, rule: AlertRule, state: _SubjectState, dump: dict[str, Any]) -> None:
         """Advance every changed_* leaf's baseline to the current resolved value.
