@@ -48,3 +48,21 @@ def test_database_open_sets_wal_and_migrates(tmp_path: Path) -> None:
         assert mode.lower() == "wal"
     finally:
         db.close()
+
+
+def test_watchlist_table_and_index_exist(tmp_path: Path) -> None:
+    """Migration v4 creates the watchlist table and its created_at index."""
+    conn = _open(tmp_path / "t.db")
+    apply_migrations(conn)
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "watchlist" in tables
+    indexes = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+    assert "ix_watchlist_created" in indexes
+
+
+def test_migration_v4_is_idempotent(tmp_path: Path) -> None:
+    """Re-applying migrations on an already-migrated DB is a no-op."""
+    conn = _open(tmp_path / "t.db")
+    apply_migrations(conn)
+    # Second pass returns [] (nothing applied).
+    assert apply_migrations(conn) == []

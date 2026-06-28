@@ -52,6 +52,7 @@ from aether.backend.notifications_api import build_notifications_router
 from aether.backend.protocol import snapshot_message
 from aether.backend.replay_api import build_replay_router
 from aether.backend.subscription import default_filter, parse_subscribe
+from aether.backend.watchlist_api import build_watchlist_router
 from aether.bus.client import DEFAULT_RECONNECT_S, connect, run_record_subscriber
 from aether.bus.demo_publisher import run_demo_publisher
 from aether.config import Settings
@@ -59,6 +60,7 @@ from aether.persist.alert_rules import list_alert_rules, seed_alert_rules
 from aether.persist.database import Database, ObservationRow, read_track_history
 from aether.persist.geofences import list_geofences
 from aether.persist.runner import run_persistence
+from aether.persist.watchlist import list_watchlist
 from aether.schema.validation import dump_record
 from aether.state.live import StateChange
 
@@ -218,6 +220,12 @@ def create_app(*, settings: Settings | None = None, demo_interval_s: float = 1.0
             # templates ship disabled, so a fresh store loads nothing that fires.
             # Read-only and exception-isolated like the geofence load (PRD §5/§37).
             await _load_alert_rules(cfg, engine)
+            # Load the persisted watchlist keys into the engine's membership set so
+            # the ``watchlist`` condition operator fires correctly from boot (PRD §24.6).
+            # Read-only and exception-isolated: a missing/corrupt store yields an empty
+            # set rather than wedging boot (PRD §5/§37). No overlay projection — the
+            # watchlist is membership state, not a live-map feature.
+            await _load_watchlist(cfg, engine)
         try:
             yield
         finally:
@@ -238,6 +246,7 @@ def create_app(*, settings: Settings | None = None, demo_interval_s: float = 1.0
 
     app = FastAPI(title="aether COP", version="0.1.0", lifespan=lifespan)
     app.include_router(build_geofence_router(cfg, hub, engine))
+    app.include_router(build_watchlist_router(cfg, engine))
     app.include_router(build_alert_rules_router(cfg, hub, engine))
     app.include_router(build_alerts_router(hub))
     app.include_router(build_notifications_router(dispatcher, clock=lambda: datetime.now(UTC)))
@@ -499,6 +508,27 @@ async def _load_geofences(cfg: Settings, hub: Hub, engine: AlertEngine) -> None:
             hub.publish(geofence.to_feature_record())
         except Exception:
             log.warning("skipping malformed geofence %s at startup", geofence.id, exc_info=True)
+
+
+async def _load_watchlist(cfg: Settings, engine: AlertEngine) -> None:
+    """Load persisted watchlist keys into the engine's membership set at startup.
+
+    Read-only and exception-isolated: a missing/corrupt store yields an empty set
+    rather than wedging boot (PRD §5/§37). After this the CRUD path keeps the engine
+    in sync directly. Unlike geofences there is no overlay to publish — the watchlist
+    is purely an identity membership set.
+    """
+    try:
+        entries = await asyncio.to_thread(list_watchlist, cfg.db_path)
+    except Exception:
+        log.warning("watchlist startup load failed; engine starts with empty set", exc_info=True)
+        return
+    try:
+        engine.set_watchlist({e.key for e in entries})
+    except Exception:
+        log.warning("syncing watchlist into the engine failed; continuing", exc_info=True)
+    if entries:
+        log.info("loaded %d watchlist entr(ies) into the engine", len(entries))
 
 
 async def _ws_send(websocket: WebSocket, conn: Connection) -> None:

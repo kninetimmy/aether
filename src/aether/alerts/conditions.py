@@ -57,7 +57,6 @@ STATELESS_OPERATORS: frozenset[ConditionOperator] = frozenset(
         "not_exists",
         "classification_basis",
         "local_rf",
-        "watchlist",
         "source_stale",
         "source_offline",
     }
@@ -78,6 +77,7 @@ CONTEXTUAL_OPERATORS: frozenset[ConditionOperator] = frozenset(
         "distance_below",
         "distance_above",
         "elevation_crossed",
+        "watchlist",
     }
 )
 
@@ -130,11 +130,14 @@ def _as_number(value: Any) -> float | None:
 
 
 def _truthiness_match(present: bool, value: Any, comparand: Any) -> bool:
-    """Shared ``local_rf``/``watchlist`` semantics: does the field's truthiness equal a target.
+    """``local_rf`` semantics: does the field's truthiness equal a target.
 
-    The comparand defaults to ``True`` (the common "is locally-received / is
-    watchlisted" rule); an explicit ``False`` matches the negative. A missing field
-    counts as falsy, so ``local_rf: false`` matches a record with no such field.
+    The comparand defaults to ``True`` (the common "is locally-received" rule); an
+    explicit ``False`` matches the negative. A missing field counts as falsy, so
+    ``local_rf: false`` matches a record with no such field.
+
+    Note: ``watchlist`` is evaluated in the contextual engine (membership is
+    identity-derived, not a record field), so it is NOT handled here.
     """
     target = True if comparand is None else bool(comparand)
     return bool(present and value) == target
@@ -171,8 +174,6 @@ def evaluate_leaf(condition: AlertCondition, dump: dict[str, Any]) -> bool:
     if op == "source_offline":
         return present and value == "offline"
     if op == "local_rf":
-        return _truthiness_match(present, value, condition.value)
-    if op == "watchlist":
         return _truthiness_match(present, value, condition.value)
 
     # Positive comparisons: an absent/null field cannot match a concrete comparand.

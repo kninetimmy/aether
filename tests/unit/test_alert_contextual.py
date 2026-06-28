@@ -597,6 +597,136 @@ def test_changed_from_fires_when_leaving_value() -> None:
     assert len(out) == 1 and out[0].state == "open"
 
 
+# --- watchlist (membership-derived, PRD §24.6/§21.5) --------------------------
+# These drive the engine end-to-end and are the regression guard for the
+# *always-falsy* bug: before M6.6b the ``watchlist`` operator read a record field no
+# adapter ever set (``attributes.watchlist``), so a watchlist rule never fired. The
+# operator now lives in the contextual evaluator and matches on the canonical
+# ``watchlist_key`` against the engine's synced membership set, so it actually fires.
+
+
+def _watchlist_rule(*, value: bool | None = True, **kw: Any) -> AlertRule:
+    return _rule(
+        subject_types=kw.pop("subject_types", ["aircraft"]),
+        conditions=[AlertCondition(field="watchlist", operator="watchlist", value=value)],
+        transition="enter",
+        **kw,
+    )
+
+
+def _network_track(lon: float, lat: float, *, id: str, alt_m: float = 3000.0) -> TrackRecord:
+    """A non-local (Internet-feed) aircraft track — ``locally_received=False`` — for
+    the combined watchlist AND local_rf case (the helper ``_track`` is always local)."""
+    return TrackRecord(
+        id=id,
+        source="net_adsb",
+        observed_at=T0,
+        received_at=T0,
+        published_at=T0,
+        correlation_key=id,
+        track_type="aircraft",
+        geometry=Point(coordinates=[lon, lat, alt_m]),
+        altitude_m=alt_m,
+        locally_received=False,
+    )
+
+
+def test_watchlist_member_fires_and_dedups() -> None:
+    # REGRESSION (always-falsy bug): a watchlisted track now produces exactly one open
+    # alert, and a repeat observation dedups against it (continuous level, enter edge).
+    clock = _Clock(T0)
+    engine = _engine(clock, [_watchlist_rule()])
+    engine.set_watchlist({"aircraft:icao:abc123"})
+    track = _track(-95.0, 40.0, id="aircraft:icao:abc123")
+
+    out = engine.evaluate(_change(track))
+    assert len(out) == 1 and out[0].state == "open"
+    assert engine.evaluate(_change(track)) == []  # still on the list → dedup
+
+
+def test_watchlist_non_member_does_not_fire() -> None:
+    clock = _Clock(T0)
+    engine = _engine(clock, [_watchlist_rule()])
+    engine.set_watchlist({"aircraft:icao:abc123"})
+    # A different identity, not on the watchlist → no fire (membership is identity-keyed).
+    assert engine.evaluate(_change(_track(-95.0, 40.0, id="aircraft:icao:def456"))) == []
+
+
+def test_watchlist_upsert_adds_membership_then_fires() -> None:
+    # Mirrors the API PUT path: engine.upsert_watchlist makes a previously-silent track
+    # fire on its next observation (level rises False→True under the enter edge).
+    clock = _Clock(T0)
+    engine = _engine(clock, [_watchlist_rule()])
+    track = _track(-95.0, 40.0, id="aircraft:icao:abc123")
+    assert engine.evaluate(_change(track)) == []  # not yet a member
+    engine.upsert_watchlist("aircraft:icao:abc123")
+    out = engine.evaluate(_change(track))
+    assert len(out) == 1 and out[0].state == "open"
+
+
+def test_watchlist_value_false_fires_for_non_member_only() -> None:
+    # value:false inverts the desired membership ("alert on anything NOT on my list").
+    clock = _Clock(T0)
+    engine = _engine(clock, [_watchlist_rule(value=False)])
+    engine.set_watchlist({"aircraft:icao:abc123"})
+    # Member → desired False but is_member True → no match.
+    assert engine.evaluate(_change(_track(-95.0, 40.0, id="aircraft:icao:abc123"))) == []
+    # Non-member → desired False, is_member False → matches → fires.
+    out = engine.evaluate(_change(_track(-95.0, 40.0, id="aircraft:icao:def456")))
+    assert len(out) == 1 and out[0].state == "open"
+
+
+def test_watchlist_removal_auto_resolves_open_alert() -> None:
+    # Mirrors the API DELETE path: removing the key drops the level True→False, so the
+    # open alert auto-resolves on the next observation (the continuous-level closing edge).
+    clock = _Clock(T0)
+    engine = _engine(clock, [_watchlist_rule()])
+    engine.set_watchlist({"aircraft:icao:abc123"})
+    track = _track(-95.0, 40.0, id="aircraft:icao:abc123")
+    out = engine.evaluate(_change(track))
+    assert len(out) == 1 and out[0].state == "open"
+
+    engine.remove_watchlist("aircraft:icao:abc123")
+    clock.t = T0 + timedelta(seconds=30)
+    resolved = engine.evaluate(_change(track))
+    assert len(resolved) == 1 and resolved[0].state == "resolved"
+
+
+def test_watchlist_combined_with_local_rf_fires_only_for_watchlisted_local() -> None:
+    # watchlist:true AND local_rf:true — both leaves ANDed in the same contextual rule.
+    # Fires only for a track that is BOTH on the watchlist AND received by my own radio;
+    # a watchlisted Internet-only track, or a local track not on the list, does not.
+    clock = _Clock(T0)
+    rule = _rule(
+        conditions=[
+            AlertCondition(field="watchlist", operator="watchlist", value=True),
+            AlertCondition(field="locally_received", operator="local_rf", value=True),
+        ],
+        transition="enter",
+    )
+    engine = _engine(clock, [rule])
+    engine.set_watchlist({"aircraft:icao:abc123", "aircraft:icao:def456"})
+
+    # Watchlisted + locally received (distinct subjects keep firing state independent).
+    fires = engine.evaluate(_change(_track(-95.0, 40.0, id="aircraft:icao:abc123")))
+    assert len(fires) == 1 and fires[0].state == "open"
+    # Watchlisted but Internet-only (locally_received=False) → local_rf leaf fails.
+    assert engine.evaluate(_change(_network_track(-95.0, 40.0, id="aircraft:icao:def456"))) == []
+    # Locally received but not on the watchlist → watchlist leaf fails.
+    assert engine.evaluate(_change(_track(-95.0, 40.0, id="aircraft:icao:ghi789"))) == []
+
+
+def test_watchlist_non_track_subject_never_member() -> None:
+    # A non-track subject (an earthquake feature) has no watchlist_key → never a member,
+    # so a watchlist:true rule pointed at a feature type stays silent (consistent, no crash).
+    clock = _Clock(T0)
+    rule = _watchlist_rule(subject_types=["earthquake"])
+    engine = _engine(clock, [rule])
+    engine.set_watchlist({"earthquake:usgs:nc1"})  # even if the corr key is "on the list"
+    # value:true on a non-track → key is None → not a member → no fire.
+    assert engine.evaluate(_change(_quake(STATION_LON, STATION_LAT))) == []
+
+
 # --- unevaluable degradation --------------------------------------------------
 
 

@@ -192,11 +192,18 @@ def test_local_rf_truthiness() -> None:
     assert evaluate_leaf(_leaf("locally_received", "local_rf", value=False), network) is True
 
 
-def test_watchlist_truthiness_on_attribute() -> None:
-    dump = _aircraft_dump()
-    dump["attributes"]["watchlist"] = True
-    assert evaluate_leaf(_leaf("attributes.watchlist", "watchlist"), dump) is True
-    assert evaluate_leaf(_leaf("attributes.watchlist", "watchlist"), _aircraft_dump()) is False
+def test_watchlist_operator_is_contextual_not_stateless() -> None:
+    """The watchlist operator is contextual (membership-based); evaluate_leaf raises."""
+    assert "watchlist" in CONTEXTUAL_OPERATORS
+    assert "watchlist" not in STATELESS_OPERATORS
+    with pytest.raises(UnsupportedOperator) as exc_info:
+        evaluate_leaf(_leaf("watchlist", "watchlist"), _aircraft_dump())
+    assert exc_info.value.operator == "watchlist"
+
+
+def test_watchlist_operator_makes_rule_not_stateless() -> None:
+    conditions = [_leaf("watchlist", "watchlist")]
+    assert is_stateless(conditions) is False
 
 
 # --- source_stale / source_offline ----------------------------------------------

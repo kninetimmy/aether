@@ -22,6 +22,7 @@ export function App() {
   const tickClock = useStore((s) => s.tickClock);
   const setStationCenter = useStore((s) => s.setStationCenter);
   const setOrbitalConfig = useStore((s) => s.setOrbitalConfig);
+  const hydrateWatchlist = useStore((s) => s.hydrateWatchlist);
   const ageMaxS = useStore((s) => s.filters.ageMaxS);
   const stale = useStore((s) => s.live.stale);
   const seq = useStore((s) => s.live.seq);
@@ -74,6 +75,13 @@ export function App() {
       cancelled = true;
     };
   }, [setStationCenter, setOrbitalConfig]);
+
+  // Reconcile the watchlist with the backend-authoritative store once on mount
+  // (M6.6b, PRD §21.5). The store starts from the localStorage cache for instant
+  // paint; this replaces it with server state. A failure keeps the cache (PRD §37).
+  useEffect(() => {
+    void hydrateWatchlist();
+  }, [hydrateWatchlist]);
 
   // Drive a 1s store clock tick ONLY while the age filter is active, so the
   // now−observed_at cutoff doesn't silently drift between WS frames. The
