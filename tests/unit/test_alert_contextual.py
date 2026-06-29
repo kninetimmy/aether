@@ -727,6 +727,81 @@ def test_watchlist_non_track_subject_never_member() -> None:
     assert engine.evaluate(_change(_quake(STATION_LON, STATION_LAT))) == []
 
 
+def _orbital(elevation_deg: float, *, norad: int = 25544) -> TrackRecord:
+    """A minimal SGP4-PREDICTED orbital_object track: only the fields the satellite-rise
+    rule reads are load-bearing — ``attributes.elevation_deg`` (greater_than leaf) and
+    ``correlation_key`` (watchlist leaf). Mirrors celestrak.py: id == correlation_key ==
+    ``orbital:celestrak:<norad>`` and predicted=True."""
+    rid = f"orbital:celestrak:{norad}"
+    return TrackRecord(
+        id=rid,
+        source="celestrak",
+        observed_at=T0,
+        received_at=T0,
+        published_at=T0,
+        correlation_key=rid,
+        track_type="orbital_object",
+        geometry=Point(coordinates=[-95.0, 40.0]),
+        altitude_m=420_000.0,
+        locally_received=False,
+        predicted=True,
+        attributes={"elevation_deg": elevation_deg, "norad_id": norad},
+    )
+
+
+def _satellite_rise_rule(**kw: Any) -> AlertRule:
+    # Same condition shape as the shipped rule-satellite-rise template.
+    return _rule(
+        subject_types=["orbital_object"],
+        conditions=[
+            AlertCondition(field="attributes.elevation_deg", operator="greater_than", value=10.0),
+            AlertCondition(field="watchlist", operator="watchlist"),
+        ],
+        transition="enter",
+        **kw,
+    )
+
+
+def test_satellite_rise_fires_once_then_auto_resolves() -> None:
+    # A WATCHED satellite whose SGP4 elevation rises below->above 10 deg fires exactly
+    # once (rising edge), dedups while above, and auto-resolves when it sets back below.
+    clock = _Clock(T0)
+    engine = _engine(clock, [_satellite_rise_rule()])
+    engine.set_watchlist({"orbital:celestrak:25544"})
+
+    assert engine.evaluate(_change(_orbital(3.0))) == []  # below floor → level False baseline
+    out = engine.evaluate(_change(_orbital(15.0)))  # crosses up through 10 deg → rising edge
+    assert len(out) == 1 and out[0].state == "open"
+    assert engine.evaluate(_change(_orbital(40.0))) == []  # still up → dedup against open alert
+
+    clock.t = T0 + timedelta(minutes=5)
+    resolved = engine.evaluate(_change(_orbital(2.0)))  # sets below → level True->False
+    assert len(resolved) == 1 and resolved[0].state == "resolved"
+
+
+def test_satellite_rise_auto_resolves_when_satellite_drops_out_of_live_state() -> None:
+    # Real-world set path: the CelesTrak adapter stops emitting a sat below the display
+    # floor, so the track is removed from live state → _on_remove auto-resolves the alert.
+    clock = _Clock(T0)
+    engine = _engine(clock, [_satellite_rise_rule()])
+    engine.set_watchlist({"orbital:celestrak:25544"})
+
+    out = engine.evaluate(_change(_orbital(15.0)))
+    assert len(out) == 1 and out[0].state == "open"
+
+    clock.t = T0 + timedelta(minutes=5)
+    resolved = engine.evaluate(_change(_orbital(15.0), op="remove"))
+    assert len(resolved) == 1 and resolved[0].state == "resolved"
+
+
+def test_satellite_rise_does_not_fire_for_unwatched_satellite() -> None:
+    # High elevation but a DIFFERENT norad on the watchlist → watchlist leaf False → inert.
+    clock = _Clock(T0)
+    engine = _engine(clock, [_satellite_rise_rule()])
+    engine.set_watchlist({"orbital:celestrak:99999"})
+    assert engine.evaluate(_change(_orbital(40.0, norad=25544))) == []
+
+
 # --- unevaluable degradation --------------------------------------------------
 
 

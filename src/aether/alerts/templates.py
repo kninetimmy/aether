@@ -244,6 +244,44 @@ _TEMPLATES: tuple[tuple[str, AlertRuleCreate], ...] = (
             ),
         ),
     ),
+    # -- M6 orbital alerts (watched satellite rise, PRD §12/§32 #17, ALERT-FR-008) ---
+    # A watched satellite is a continuous track (valid_from has no meaning here), so this
+    # rides ``enter``: it fires once on the rising edge as the SGP4-PREDICTED elevation
+    # crosses up through the threshold and auto-resolves on set (the level drops back below
+    # it, or the satellite ages out of live state once it falls under the display floor).
+    # It keys off ``attributes.elevation_deg`` — the AUTHORITATIVE SGP4 az/el set by the
+    # CelesTrak adapter — NOT the flat-earth ``geo.elevation_angle_deg`` of the
+    # ``elevation_crossed`` operator (which is ~10 deg wrong near the horizon for orbits).
+    # The ``watchlist`` leaf scopes it to the operator's orbital watchlist
+    # (orbital:celestrak:<norad>); with an empty watchlist it is visibly inert (never
+    # fires) rather than alerting AOI-wide. AOI/floor-bounded and disabled by default.
+    (
+        "rule-satellite-rise",
+        AlertRuleCreate(
+            name="Watched satellite rise",
+            severity="info",
+            subject_types=["orbital_object"],
+            conditions=[
+                AlertCondition(
+                    field="attributes.elevation_deg", operator="greater_than", value=10.0
+                ),
+                AlertCondition(field="watchlist", operator="watchlist"),
+            ],
+            enabled=False,
+            transition="enter",
+            channels=["dashboard", "browser"],
+            description=(
+                "A satellite on your watchlist has risen above 10 deg elevation as seen "
+                "from the home station. Position and elevation are SGP4-PREDICTED from the "
+                "latest CelesTrak element sets (accuracy degrades with element age), not "
+                "observed, and are not a precise antenna look-angle. Fires once on rise "
+                "and auto-resolves on set; detection is bounded by the configured display "
+                "elevation floor. Requires a configured station position and the satellite "
+                "on your watchlist (orbital:celestrak:<norad>). Not authoritative for any "
+                "operational use (PRD §32 #17)."
+            ),
+        ),
+    ),
 )
 
 

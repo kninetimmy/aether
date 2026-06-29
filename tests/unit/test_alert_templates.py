@@ -80,3 +80,18 @@ def test_tfr_became_active_template_targets_tfr_layer_with_temporal_operator() -
     assert (cond.field, cond.operator) == ("valid_from", "became_active")
     # AOI-wide by default; no geofence wired (pair with a fence/distance rule to scope).
     assert tfr.geofence_id is None
+
+
+def test_satellite_rise_template_targets_orbital_layer() -> None:
+    rule = {t.id: t for t in default_rule_templates(T0)}["rule-satellite-rise"]
+    assert rule.subject_types == ["orbital_object"]
+    assert rule.transition == "enter"  # fire once on rise, auto-resolve on set (PRD §32 #17)
+    assert rule.enabled is False  # ALERT-FR-008
+    assert rule.geofence_id is None  # scoped by the watchlist leaf, not a fence
+    ops = {(c.field, c.operator) for c in rule.conditions}
+    assert ops == {
+        ("attributes.elevation_deg", "greater_than"),
+        ("watchlist", "watchlist"),
+    }
+    elev = next(c for c in rule.conditions if c.operator == "greater_than")
+    assert elev.value == 10.0  # authoritative SGP4 elevation, not the flat-earth helper
