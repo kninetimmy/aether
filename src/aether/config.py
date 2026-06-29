@@ -250,13 +250,24 @@ DEFAULT_FAA_NOTAM_MAX_PAGES_PER_POLL = 5
 #: propagated on a fast cadence and filtered to those above ``min_elevation_deg`` (ORBIT-FR-007).
 DEFAULT_CELESTRAK_BASE_URL = "https://celestrak.org"
 #: Default GP groups: crewed/uncrewed stations, the full active catalog, and amateur-radio
-#: birds. The ``active`` group is large — Pi-heavy at a fast propagate cadence; full
-#: multi-tier cadence (ORBIT-FR-011) is deferred to M6.6 (see docs/orbital-celestrak.md).
+#: birds. The ``active`` group is large — Pi-heavy at a fast propagate cadence, so it rides
+#: the SLOW cadence (``DEFAULT_CELESTRAK_PROPAGATE_S``) while the operator's watchlisted
+#: objects ride the FAST cadence (ORBIT-FR-011, M6.6b; see docs/orbital-celestrak.md).
 DEFAULT_CELESTRAK_GROUPS = ("stations", "active", "amateur")
 #: Sync no faster than CelesTrak's 2 h refresh; 6 h is safe and gentle (§38).
 DEFAULT_CELESTRAK_SYNC_S = 21600.0
-#: Propagate the synced set on this cadence; 15 s is a smooth-enough track without churn.
+#: Slow tier: propagate the broad synced catalog on this cadence; 15 s is a smooth-enough
+#: track without churn (ORBIT-FR-011 forbids the whole catalog at ~1 s).
 DEFAULT_CELESTRAK_PROPAGATE_S = 15.0
+#: Fast tier (ORBIT-FR-011): re-propagate only the WATCHLISTED objects this often for smooth
+#: tracks. A handful of operator-selected objects, so 2 s is smooth without violating
+#: ORBIT-FR-011 (which forbids the whole catalog at ~1 s). LOCAL CPU only — it never changes
+#: the 6 h fetch/sync cadence (§38 rate limit).
+DEFAULT_CELESTRAK_PROPAGATE_FAST_S = 2.0
+#: Re-read the persisted watchlist this often so toggling a satellite moves it between the fast
+#: and slow tiers WITHOUT an adapter restart. A cheap read-only indexed SELECT; 30 s is responsive
+#: to a UI toggle and §38 does not apply (local SQLite, not a network fetch).
+DEFAULT_CELESTRAK_WATCHLIST_REFRESH_S = 30.0
 #: Emit only objects currently above this elevation (deg) over the observer (ORBIT-FR-007).
 DEFAULT_CELESTRAK_MIN_ELEVATION_DEG = 10.0
 #: On-map freshness of a propagated position; it ages off via the live-state expiry sweep so a
@@ -575,6 +586,8 @@ class Settings:
     celestrak_min_elevation_deg: float = DEFAULT_CELESTRAK_MIN_ELEVATION_DEG
     celestrak_sync_s: float = DEFAULT_CELESTRAK_SYNC_S
     celestrak_propagate_s: float = DEFAULT_CELESTRAK_PROPAGATE_S
+    celestrak_propagate_fast_s: float = DEFAULT_CELESTRAK_PROPAGATE_FAST_S
+    celestrak_watchlist_refresh_s: float = DEFAULT_CELESTRAK_WATCHLIST_REFRESH_S
     celestrak_valid_s: float = DEFAULT_CELESTRAK_VALID_S
     celestrak_timeout_s: float = DEFAULT_CELESTRAK_TIMEOUT_S
 
@@ -868,6 +881,16 @@ class Settings:
             ),
             celestrak_propagate_s=float(
                 os.environ.get("AETHER_CELESTRAK_PROPAGATE_S", DEFAULT_CELESTRAK_PROPAGATE_S)
+            ),
+            celestrak_propagate_fast_s=float(
+                os.environ.get(
+                    "AETHER_CELESTRAK_PROPAGATE_FAST_S", DEFAULT_CELESTRAK_PROPAGATE_FAST_S
+                )
+            ),
+            celestrak_watchlist_refresh_s=float(
+                os.environ.get(
+                    "AETHER_CELESTRAK_WATCHLIST_REFRESH_S", DEFAULT_CELESTRAK_WATCHLIST_REFRESH_S
+                )
             ),
             celestrak_valid_s=float(
                 os.environ.get("AETHER_CELESTRAK_VALID_S", DEFAULT_CELESTRAK_VALID_S)

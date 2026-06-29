@@ -11,6 +11,7 @@ the capability gate is tested by stubbing ``build_satrec`` to raise. No broker, 
 import asyncio
 import dataclasses
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -19,6 +20,7 @@ from aether.adapters.celestrak import (
     SOURCE,
     CelestrakHttpProvider,
     CelestrakNoRetry,
+    _read_watchlisted_norads,
     build_provider,
     build_satrecs,
     celestrak_records,
@@ -28,7 +30,10 @@ from aether.adapters.celestrak import (
 from aether.adapters.celestrak_fake_feeder import FakeCelestrakProvider
 from aether.config import Settings
 from aether.orbital.sgp4_propagate import Sgp4Unavailable
+from aether.persist.database import Database
+from aether.persist.watchlist import upsert_watchlist_entry
 from aether.schema.records import SCHEMA_VERSION, SourceStatusRecord, TrackRecord
+from aether.schema.watchlist import WatchlistEntry, WatchlistEntryCreate
 
 # The feeder-driven tests below run the REAL SGP4 propagate path, so this whole module needs
 # the optional ``[orbital]`` extra. Skip cleanly when ``sgp4`` is absent (mirrors the GLM/
@@ -366,3 +371,139 @@ def test_http_provider_url_encodes_group() -> None:
     parsed = urllib.parse.parse_qs(urllib.parse.urlsplit(captured["url"]).query)
     assert parsed["FORMAT"] == ["json"]  # injection did NOT override FORMAT
     assert parsed["GROUP"] == ["evil&FORMAT=csv"]  # decoded back to the literal group
+
+
+# --- Two-tier watchlist-driven propagation (ORBIT-FR-011, M6.6b Part B) ---------
+
+
+def _migrated_db(tmp_path: Path) -> str:
+    """A store with the schema applied (migration v4 creates ``watchlist``)."""
+    path = str(tmp_path / "watchlist.db")
+    db = Database(path)
+    db.open()  # runs all migrations including v4 (watchlist)
+    db.close()
+    return path
+
+
+def _seed_watch(path: str, *keys: str) -> None:
+    for key in keys:
+        upsert_watchlist_entry(
+            path, WatchlistEntry.create(WatchlistEntryCreate(), key=key, now=NOW)
+        )
+
+
+def test_read_watchlisted_norads_parses_orbital_keys(tmp_path: Path) -> None:
+    path = _migrated_db(tmp_path)
+    _seed_watch(
+        path,
+        "orbital:celestrak:25544",
+        "orbital:celestrak:99001",
+        "aircraft:icao:abc123",  # not orbital — filtered out
+        "orbital:celestrak:NaN",  # malformed suffix — skipped, never raises
+    )
+    assert _read_watchlisted_norads(path) == {25544, 99001}
+    # A missing store must degrade to empty, never raise (honest degradation, §37).
+    assert _read_watchlisted_norads("/no/such.db") == set()
+
+
+def test_watchlist_none_is_single_cadence() -> None:
+    # No watchlist_source ⇒ the fast tier collapses and the stream is identical-to-today.
+    records = asyncio.run(_drive(_records_agen(_feeder()), statuses_wanted=2))
+    status = records[-1]
+    assert isinstance(status, SourceStatusRecord)
+    assert status.attributes["fast_tracked"] == 0
+    assert status.attributes["slow_tracked"] == 3  # whole roster rides the slow tier
+    assert status.attributes["tracked_objects"] == 3
+    assert "propagate_fast_s" in status.attributes  # cadence transparency present even when off
+
+
+def test_fast_tier_emits_watched_only_no_double_emit() -> None:
+    # propagate_fast_s=1e9 parks the fast tier after its first tick; the slow tier permanently
+    # excludes the watchlisted NORAD ⇒ 99001 appears EXACTLY once (ironclad disjoint proof).
+    records = asyncio.run(
+        _drive(
+            _records_agen(
+                _feeder(),
+                watchlist_source=lambda: {99001},
+                propagate_fast_s=1e9,
+                propagate_s=0.0,
+                watchlist_refresh_s=1e9,
+            ),
+            statuses_wanted=4,  # starting + 3 slow connecteds
+        )
+    )
+    overhead = [t for t in _tracks(records) if t.attributes["object_name"] == "AETHER-GEO-OVERHEAD"]
+    assert len(overhead) == 1  # fast tier, tick 1 only — never double-emitted by the slow tier
+    assert overhead[0].attributes["norad_id"] == 99001
+
+
+def test_connected_status_partition_counts() -> None:
+    # Fast fires before slow within tick 1, so fast_above_horizon reads 1 in the first status.
+    records = asyncio.run(
+        _drive(
+            _records_agen(
+                _feeder(),
+                watchlist_source=lambda: {99001},
+                propagate_fast_s=0.0,
+                propagate_s=0.0,
+                watchlist_refresh_s=1e9,
+            ),
+            statuses_wanted=2,
+        )
+    )
+    status = records[-1]
+    assert isinstance(status, SourceStatusRecord)
+    assert status.attributes["tracked_objects"] == 3
+    assert status.attributes["watchlisted"] == 1
+    assert status.attributes["fast_tracked"] == 1  # 99001 ∩ synced catalog
+    assert status.attributes["slow_tracked"] == 2  # ISS + far GEO
+    assert status.attributes["fast_above_horizon"] == 1  # overhead GEO is reliably above horizon
+
+
+def test_watchlist_refresh_promotes_without_restart() -> None:
+    # The reader returns empty first, then {99001}: a live re-read must move 99001 into the
+    # fast tier WITHOUT restarting the adapter (watchlist_refresh_s=0.0 re-reads every tick).
+    calls = [0]
+
+    def reader() -> set[int]:
+        calls[0] += 1
+        return set() if calls[0] == 1 else {99001}
+
+    records = asyncio.run(
+        _drive(
+            _records_agen(
+                _feeder(),
+                watchlist_source=reader,
+                watchlist_refresh_s=0.0,
+                propagate_s=0.0,
+                propagate_fast_s=1e9,
+            ),
+            statuses_wanted=3,
+        )
+    )
+    fast_counts = [
+        r.attributes["fast_tracked"]
+        for r in records
+        if isinstance(r, SourceStatusRecord) and r.status == "connected"
+    ]
+    assert 0 in fast_counts  # before promotion
+    assert 1 in fast_counts  # after the live re-read — no restart
+
+
+def test_watchlist_read_error_is_isolated() -> None:
+    # A raising reader must be caught, logged, and treated as empty — the adapter degrades to a
+    # single tier for that cycle and never crashes (failure isolation, §37).
+    def boom() -> set[int]:
+        raise RuntimeError("watchlist exploded")
+
+    records = asyncio.run(
+        _drive(
+            _records_agen(_feeder(), watchlist_source=boom, propagate_s=0.0),
+            statuses_wanted=2,
+        )
+    )
+    status = records[-1]
+    assert isinstance(status, SourceStatusRecord)
+    assert status.attributes["fast_tracked"] == 0  # treated as empty
+    names = {t.attributes["object_name"] for t in _tracks(records)}
+    assert "AETHER-GEO-OVERHEAD" in names  # slow tier still emitted it (degraded single tier)

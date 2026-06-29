@@ -13,11 +13,16 @@ path). Skips when no broker is reachable (see conftest); CI starts Mosquitto so 
 """
 
 import dataclasses
+from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from aether.config import Settings
+from aether.persist.database import Database
+from aether.persist.watchlist import upsert_watchlist_entry
+from aether.schema.watchlist import WatchlistEntry, WatchlistEntryCreate
 
 pytest.importorskip("sgp4")
 
@@ -104,3 +109,68 @@ def test_missing_sgp4_yields_one_offline_status_over_the_ws(
             assert rec.get("track_type") != "orbital_object", "plotted an orbit despite no sgp4"
         assert offline is not None, "no offline status reached the ws when sgp4 was unavailable"
         assert offline["error_code"] == "Sgp4Unavailable"
+
+
+def test_watchlisted_object_propagates_on_fast_tier_end_to_end(
+    broker_settings: Settings, tmp_path: Path
+) -> None:
+    # End-to-end two-tier (ORBIT-FR-011, M6.6b Part B): a persisted orbital watchlist entry must
+    # drive the REAL list_watchlist read → cfg.db_path → partition → fast tier. We seed a migrated
+    # store with the GEO-OVERHEAD (99001) on the watchlist, run the fake feeder with persist on,
+    # and confirm a celestrak source_status carries fast_tracked >= 1 AND the 99001 track arrives
+    # with attribution/caveat — proving the real persistence→adapter wiring, not just the loop.
+    db = tmp_path / "aether.db"
+    store = Database(str(db))
+    store.open()  # migration v4 creates the watchlist table
+    store.close()
+    upsert_watchlist_entry(
+        str(db),
+        WatchlistEntry.create(
+            WatchlistEntryCreate(label="GEO"),
+            key="orbital:celestrak:99001",
+            now=datetime.now(UTC),
+        ),
+    )
+
+    cfg = dataclasses.replace(
+        broker_settings,
+        demo_source=False,
+        celestrak=True,
+        celestrak_base_url="fake",  # no-hardware feeder, drives the real SGP4 path
+        celestrak_observer_lat=OBS_LAT,
+        celestrak_observer_lon=OBS_LON,
+        celestrak_min_elevation_deg=10.0,
+        celestrak_propagate_s=0.05,
+        celestrak_propagate_fast_s=0.05,
+        celestrak_watchlist_refresh_s=0.05,
+        celestrak_sync_s=1e9,  # one sync for the test
+        persist=True,
+        db_path=str(db),
+    )
+
+    with TestClient(create_app(settings=cfg)) as client, client.websocket_connect("/ws/v2") as ws:
+        ws.receive_json()  # snapshot
+        fast_status = None
+        orbital = None
+        for _ in range(800):
+            msg = ws.receive_json()
+            rec = msg.get("record", {})
+            if (
+                msg["type"] == "source_status"
+                and rec.get("source") == "celestrak"
+                and rec.get("attributes", {}).get("fast_tracked", 0) >= 1
+            ):
+                fast_status = rec
+            if msg["type"] == "track_upsert" and rec.get("track_type") == "orbital_object":
+                if rec.get("attributes", {}).get("norad_id") == 99001:
+                    orbital = rec
+            if fast_status is not None and orbital is not None:
+                break
+
+        assert fast_status is not None, "no celestrak status reported fast_tracked >= 1"
+        assert fast_status["attributes"]["watchlisted"] >= 1
+        assert orbital is not None, "watchlisted orbital_object (99001) never arrived over the ws"
+        assert orbital["predicted"] is True
+        attrs = orbital["attributes"]
+        assert attrs["attribution"].startswith("Orbital data: CelesTrak")
+        assert "not for navigation" in attrs["caveat"].lower()
