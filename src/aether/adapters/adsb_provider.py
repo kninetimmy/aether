@@ -360,7 +360,16 @@ def _blocking_get(url: str, timeout_s: float) -> bytes:
     """Single blocking HTTPS GET with a size cap; run off-loop via ``to_thread``."""
     if not url.startswith("https://"):  # provider base_url is https; never downgrade
         raise ValueError(f"refusing non-https provider URL: {url!r}")
-    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    # adsb.fi's open-data API is fronted by a WAF that 403s urllib's default
+    # ``Python-urllib/x.y`` agent; identify the client politely (PRD §38 "respect
+    # provider terms") so the request is accepted.
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "aether/0.1 (+https://github.com/kninetimmy/aether)",
+        },
+    )
     with urllib.request.urlopen(req, timeout=timeout_s) as resp:  # noqa: S310 (https-checked)
         return bytes(resp.read(MAX_RESPONSE_BYTES + 1))
 

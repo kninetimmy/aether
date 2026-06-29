@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  aprsPacketKind,
   featurePresentation,
   lightningStyle,
   militaryBadge,
   presentationFor,
   severityColor,
   sourceStateColor,
+  trackDetails,
   trackPresentation,
 } from "./presentationRegistry";
 import type {
@@ -153,6 +155,99 @@ describe("lightningStyle (LIGHTNING-FR-006)", () => {
     expect(ls.flashRadius).toBeLessThan(ls.clusterRadius.base);
     expect(ls.flashColor).toBeTruthy();
     expect(ls.countColor).toBeTruthy();
+  });
+});
+
+/** Flatten a track's detail groups into one {label: value} map for assertions. */
+function fieldMap(track: TrackRecord): Record<string, string> {
+  const m: Record<string, string> = {};
+  for (const g of trackDetails(track)) for (const f of g.fields) m[f.label] = f.value;
+  return m;
+}
+
+describe("aprsPacketKind", () => {
+  it("classifies a weather packet off the parsed weather block", () => {
+    const k = aprsPacketKind(
+      baseTrack({ track_type: "aprs_station", attributes: { weather: { temp_f: 70 } } }),
+    );
+    expect(k?.text).toBe("Weather");
+  });
+
+  it("classifies status, plain position, and objects distinctly", () => {
+    expect(
+      aprsPacketKind(
+        baseTrack({ track_type: "aprs_station", attributes: { status: "QTH" } }),
+      )?.text,
+    ).toBe("Status");
+    expect(aprsPacketKind(baseTrack({ track_type: "aprs_station" }))?.text).toBe(
+      "Position",
+    );
+    expect(aprsPacketKind(baseTrack({ track_type: "aprs_object" }))?.text).toBe("Object");
+  });
+
+  it("is null for non-APRS tracks", () => {
+    expect(aprsPacketKind(baseTrack({ track_type: "aircraft" }))).toBeNull();
+  });
+});
+
+describe("trackDetails", () => {
+  it("renders APRS weather contents under a Weather group", () => {
+    const t = baseTrack({
+      track_type: "aprs_station",
+      attributes: {
+        weather: {
+          temp_f: 67,
+          temp_c: 19.44,
+          wind_dir_deg: 90,
+          wind_speed_mph: 5,
+          gust_mph: 9,
+          humidity_pct: 90,
+          pressure_hpa: 1014.9,
+        },
+      },
+    });
+    expect(trackDetails(t).some((g) => g.heading === "Weather")).toBe(true);
+    const f = fieldMap(t);
+    expect(f["Temperature"]).toContain("67°F");
+    expect(f["Wind"]).toContain("mph");
+    expect(f["Humidity"]).toBe("90%");
+  });
+
+  it("decodes the aircraft size class from the emitter category", () => {
+    const f = fieldMap(
+      baseTrack({
+        track_type: "aircraft",
+        attributes: { category: "A5", r: "N473MC", t: "B744" },
+      }),
+    );
+    expect(f["Registration"]).toBe("N473MC");
+    expect(f["Type"]).toBe("B744");
+    expect(f["Category"]).toContain("Heavy");
+  });
+
+  it("shows orbital look-angles + element age and never invents absent fields", () => {
+    const t = baseTrack({
+      track_type: "orbital_object",
+      altitude_m: 500000,
+      attributes: {
+        norad_id: 25544,
+        elevation_deg: 43.5,
+        azimuth_deg: 117.6,
+        slant_range_m: 3514544,
+        element_age_s: 46216,
+      },
+    });
+    const f = fieldMap(t);
+    expect(f["NORAD"]).toBe("25544");
+    expect(f["Elevation"]).toContain("°");
+    expect(f["Element age"]).toBeTruthy();
+    expect(f["Int'l ID"]).toBeUndefined(); // object_id absent → omitted, not invented
+  });
+
+  it("omits motion/position fields that are absent (defensive)", () => {
+    const keys = Object.keys(fieldMap(baseTrack({ track_type: "aircraft" })));
+    expect(keys).not.toContain("Altitude");
+    expect(keys).not.toContain("Position");
   });
 });
 
