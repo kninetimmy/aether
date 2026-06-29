@@ -8,7 +8,14 @@
 // star toggles the stable watchlistKey. All styling routes through the centralized
 // presentation registry; this component stays dumb.
 
-import { militaryBadge, toiHighlight } from "../../map/presentationRegistry";
+import { Fragment } from "react";
+import {
+  aprsPacketKind,
+  militaryBadge,
+  toiHighlight,
+  trackDetails,
+  trackPresentation,
+} from "../../map/presentationRegistry";
 import { isOnWatchlist, watchlistKey } from "../../state/selectors";
 import { useStore } from "../../state/store";
 import { fusionMeta, type FusionContributor, type TrackRecord } from "../../types/records";
@@ -78,11 +85,29 @@ export function TOIDetailsPanel() {
   // Honest local-reception line (T27): "live locally" ONLY when an antenna leg is
   // live now; otherwise the last-heard-locally timestamp, never labeled live.
   const lastLocal = meta?.last_local_rf_at ?? null;
+  // Per-type detail groups + (APRS) packet-kind badge resolved by the centralized
+  // presentation registry; the panel just renders what it returns.
+  const pres = trackPresentation(track);
+  const kind = aprsPacketKind(track);
+  const details = trackDetails(track);
+  // Honest-labeling footnote: surface any provider caveat the record carries
+  // (e.g. SGP4 "predicted, not for navigation"; SondeHub "displays, not decides").
+  const caveat =
+    typeof track.attributes["caveat"] === "string"
+      ? (track.attributes["caveat"] as string)
+      : null;
 
   return (
     <section className="panel-section toi-panel" aria-label="TOI details">
       <h2>
-        TOI
+        <span className="toi-title" title={track.label ?? track.id}>
+          {pres.label}
+        </span>
+        {kind && (
+          <span className="detail-kind" title={kind.title}>
+            {kind.text}
+          </span>
+        )}
         <button
           type="button"
           className={`star${onList ? " on" : ""}`}
@@ -134,6 +159,22 @@ export function TOIDetailsPanel() {
           </>
         )}
       </dl>
+
+      {details.map((g, i) => (
+        <div className="detail-group" key={g.heading ?? `g${i}`}>
+          {g.heading && <h3 className="muted">{g.heading}</h3>}
+          <dl className="toi-fields">
+            {g.fields.map((f) => (
+              <Fragment key={f.label}>
+                <dt>{f.label}</dt>
+                <dd title={f.title}>{f.value}</dd>
+              </Fragment>
+            ))}
+          </dl>
+        </div>
+      ))}
+
+      {caveat && <p className="detail-caveat muted">{caveat}</p>}
 
       {meta && meta.contributors.length > 0 && (
         <div className="toi-contributors">

@@ -323,6 +323,43 @@ ul {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* Selected-track title (truncates) + per-type packet-kind badge (PRD §24.6). */
+.toi-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.detail-kind {
+  flex: none;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 3px;
+  color: var(--bg);
+  background: #62d0ff;
+  cursor: help;
+}
+/* Per-type detail groups (weather / aircraft / look-angles …) under the identity
+   fields, each a small heading over a reused .toi-fields grid. */
+.detail-group {
+  margin-top: 10px;
+}
+.detail-group h3 {
+  margin: 0 0 3px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+/* Honest-labeling caveat footnote (predicted/inferred provider notes). */
+.detail-caveat {
+  margin-top: 10px;
+  font-size: 11px;
+  font-style: italic;
+  line-height: 1.35;
+}
+
 .toi-live {
   color: var(--local);
   font-weight: 700;

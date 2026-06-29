@@ -137,9 +137,31 @@ export function fusionMeta(track: TrackRecord): FusionMeta | undefined {
 // ship_type (int code) / ship_type_text, nav_status (int code) / nav_status_text.
 
 /** Read a string attribute defensively; undefined when absent or not a string. */
-export function aisAttr(track: TrackRecord, key: string): string | undefined {
+export function strAttr(track: TrackRecord, key: string): string | undefined {
   const raw = track.attributes?.[key];
   return typeof raw === "string" ? raw : undefined;
+}
+
+/** Read a finite-number attribute defensively; undefined when absent or non-finite. */
+export function numAttr(track: TrackRecord, key: string): number | undefined {
+  const raw = track.attributes?.[key];
+  return typeof raw === "number" && Number.isFinite(raw) ? raw : undefined;
+}
+
+/** Read a plain-object attribute defensively; undefined when absent or not an object. */
+export function objAttr(
+  track: TrackRecord,
+  key: string,
+): Record<string, unknown> | undefined {
+  const raw = track.attributes?.[key];
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  return raw as Record<string, unknown>;
+}
+
+/** Read a string attribute defensively; undefined when absent or not a string.
+ *  AIS-named alias of {@link strAttr} kept for the existing AIS filter call sites. */
+export function aisAttr(track: TrackRecord, key: string): string | undefined {
+  return strAttr(track, key);
 }
 
 /**
