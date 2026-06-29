@@ -5,7 +5,8 @@ propagates them with **SGP4** to plot overhead objects on the COP as ``orbital_o
 tracks. This is *tracking* (propagating published elements to a position), never satellite
 reception (PRD §5 settled decision).
 
-Two cadences (one sync, one propagate) over one provider:
+Three cadences: one sync, two propagate (fast watchlisted / slow catalog), plus a cheap
+watchlist refresh — over one provider:
 
 1. **Sync** (default every 6 h, no faster than CelesTrak's ~2 h refresh — §38 rate limit):
    ``GET <base>/NORAD/elements/gp.php?GROUP=<slug>&FORMAT=json`` per configured group.
@@ -14,11 +15,20 @@ Two cadences (one sync, one propagate) over one provider:
    by NORAD id, with its element-set epoch retained for an age label. On HTTP 301/403/404 the
    request is **abandoned** (the response will not change; 50 such errors in 2 h firewalls the
    IP) and the last-good cache is served — never a tight retry loop.
-2. **Propagate** (default every 15 s): propagate the whole synced set to *now*, keep only
-   objects currently above ``min_elevation_deg`` (ORBIT-FR-007, default 10°), and emit one
+2. **Propagate** — two tiers over a **disjoint partition** of the synced set (ORBIT-FR-011):
+   the operator's **watchlisted** objects (``orbital:celestrak:<norad>`` keys, read from the
+   persistence store) ride a **fast** cadence (default 2 s) for smooth tracks, while the broad
+   catalog rides the existing **slow** cadence (default 15 s). Because the partition is a strict
+   set difference on NORAD id, a watchlisted object is propagated/emitted by the fast tier only —
+   never double-emitted by the slow tier. Each tick propagates its subset to *now*, keeps only
+   objects currently above ``min_elevation_deg`` (ORBIT-FR-007, default 10°), and emits one
    ``orbital_object`` ``TrackRecord`` each — positions labelled ``predicted=True`` with the
    element-set epoch age in attributes. A propagation/NaN error skips that object (the orbit
-   is never plotted at a bad position — fail-visibly, §37).
+   is never plotted at a bad position — fail-visibly, §37). The watchlist is re-read every
+   ``watchlist_refresh_s`` (default 30 s) so toggling a satellite moves it between tiers with
+   no adapter restart; an absent/empty watchlist (persistence off) collapses the fast tier and
+   the behaviour is identical to the single-cadence M6.5 path. The fast tier only changes the
+   PROPAGATE cadence (local CPU) — it never touches the fetch/sync cadence (§38).
 
 Capability-gated on the optional ``sgp4`` parser (the ``[orbital]`` extra), imported lazily
 inside :mod:`aether.orbital.sgp4_propagate`: a missing dep degrades to one ``offline`` status
@@ -40,6 +50,7 @@ import asyncio
 import functools
 import json
 import logging
+import math
 import random
 import urllib.error
 import urllib.parse
@@ -59,6 +70,7 @@ from aether.orbital.sgp4_propagate import (
     build_satrec,
     propagate,
 )
+from aether.persist.watchlist import list_watchlist
 from aether.schema.geometry import Point
 from aether.schema.provenance import Provenance
 from aether.schema.records import Record, SourceStatusRecord, TrackRecord
@@ -364,6 +376,85 @@ def _status(
     )
 
 
+# --- Two-tier watchlist partition (ORBIT-FR-011) -------------------------------
+
+#: Watchlist keys for orbital objects are minted as ``orbital:celestrak:<norad>`` (the same
+#: identity key the alert engine + UI use); the integer suffix is the NORAD catalogue id.
+_WATCHLIST_KEY_PREFIX = "orbital:celestrak:"
+
+
+def _read_watchlisted_norads(path: str) -> set[int]:
+    """Blocking read of the persisted watchlist → orbital NORAD ids. Drive via
+    ``asyncio.to_thread`` so it never blocks the loop. Honest degradation: a missing store/
+    table (``list_watchlist`` → ``[]``) or any parse issue yields an empty set, never raises."""
+    out: set[int] = set()
+    try:
+        entries = list_watchlist(path)
+    except Exception:
+        log.warning("CelesTrak watchlist read failed; treating as empty", exc_info=True)
+        return set()
+    for entry in entries:
+        if entry.key.startswith(_WATCHLIST_KEY_PREFIX):
+            try:
+                out.add(int(entry.key[len(_WATCHLIST_KEY_PREFIX) :]))
+            except ValueError:
+                continue  # malformed suffix → skip, never crash
+    return out
+
+
+def _partition(
+    elements: list[OrbitalElement], fast_norads: set[int]
+) -> tuple[list[OrbitalElement], list[OrbitalElement]]:
+    """Disjoint split: ``(watchlisted-in-catalog, the rest)``. Empty watchlist → ``([], all)``.
+
+    The split is a strict set membership test on ``norad_id``, so the fast and slow lists are
+    guaranteed disjoint — the structural no-double-emit guarantee (ORBIT-FR-011): a watchlisted
+    NORAD can only ever be in ``fast``, so the slow tier never re-emits it.
+    """
+    if not fast_norads:
+        return [], list(elements)
+    fast = [e for e in elements if e.norad_id in fast_norads]
+    slow = [e for e in elements if e.norad_id not in fast_norads]
+    return fast, slow
+
+
+def _propagate_set(
+    subset: list[OrbitalElement],
+    *,
+    observer_lat: float,
+    observer_lon: float,
+    observer_alt_m: float,
+    at: datetime,
+    valid_s: float,
+    min_elevation_deg: float,
+) -> tuple[list[TrackRecord], int]:
+    """Propagate a subset to ``at``; return ``(above-horizon records, prop_skipped)``.
+
+    Lifted verbatim from the original inner ``for element in elements:`` block: a ``None``
+    propagation (NaN/decayed) is skipped and counted; an object below the elevation floor is
+    dropped (ORBIT-FR-007). Shared by both tiers so they apply identical filtering.
+    """
+    out: list[TrackRecord] = []
+    skipped = 0
+    for element in subset:
+        record = element_to_record(
+            element,
+            observer_lat=observer_lat,
+            observer_lon=observer_lon,
+            observer_alt_m=observer_alt_m,
+            at=at,
+            valid_s=valid_s,
+        )
+        if record is None:
+            skipped += 1
+            continue
+        elevation = record.attributes["elevation_deg"]
+        if not isinstance(elevation, (int, float)) or elevation < min_elevation_deg:
+            continue  # below the horizon floor — not emitted (ORBIT-FR-007)
+        out.append(record)
+    return out, skipped
+
+
 # --- Records stream + bus pump -------------------------------------------------
 
 
@@ -379,30 +470,58 @@ async def celestrak_records(
     propagate_s: float = 15.0,
     valid_s: float = 30.0,
     now_fn: Callable[[], datetime] | None = None,
+    watchlist_source: Callable[[], set[int]] | None = None,
+    propagate_fast_s: float = 2.0,
+    watchlist_refresh_s: float = 30.0,
 ) -> AsyncIterator[Record]:
     """Yield the CelesTrak record stream: ``starting``, sync GP, then propagate each tick.
 
     The sync fetches each group's OMM JSON no faster than ``sync_s`` (default 6 h, well above
     CelesTrak's 2 h refresh — §38), rebuilding the cached element set; on a non-retryable
     301/403/404 (:class:`CelestrakNoRetry`) or any fetch/parse error the **last-good** cache
-    is kept and the source reports ``degraded`` rather than going dark. Between syncs each
-    ``propagate_s`` tick propagates the full set to *now* and emits one ``orbital_object``
-    ``TrackRecord`` per object currently above ``min_elevation_deg`` (ORBIT-FR-007). A missing
+    is kept and the source reports ``degraded`` rather than going dark.
+
+    Between syncs the set is propagated on **two tiers** over a disjoint partition (ORBIT-FR-011).
+    ``watchlist_source`` is an injected *blocking* reader returning the watchlisted NORAD ids
+    (``orbital:celestrak:<norad>`` keys from the persistence store); it is driven via
+    ``asyncio.to_thread`` so it never blocks the loop, and re-read every ``watchlist_refresh_s``
+    (default 30 s) so toggling a satellite moves it between tiers **without an adapter restart**.
+    Watchlisted objects propagate on the **fast** cadence ``propagate_fast_s`` (default 2 s) for
+    smooth tracks; the broad catalog rides the existing **slow** cadence ``propagate_s`` (default
+    15 s) which also emits the single ``connected`` status. Because the partition is a strict set
+    difference on NORAD id, a watchlisted object is emitted by the fast tier **only** — never
+    double-emitted. When ``watchlist_source`` is ``None`` (persistence off) or the watchlist is
+    empty the fast tier collapses and the stream is byte-identical to the single-cadence M6.5
+    path. Each tick keeps only objects above ``min_elevation_deg`` (ORBIT-FR-007). A missing
     ``sgp4`` parser propagates as :class:`Sgp4Unavailable` to :func:`run_celestrak` (the
-    capability gate). Failure isolation throughout (PRD §17.4/§37).
+    capability gate). Failure isolation throughout (PRD §17.4/§37) — a watchlist read error is
+    logged and treated as empty, never crashing the adapter.
     """
     now = now_fn or _now
     yield _status("starting", now())
     backoff = INITIAL_BACKOFF_S
+    loop = asyncio.get_event_loop()
     elements: list[OrbitalElement] = []
+    fast_elements: list[OrbitalElement] = []
+    slow_elements: list[OrbitalElement] = []
+    fast_norads: set[int] = set()
+    fast_above = 0
+    last_record_at: datetime | None = None
     received = 0
     rejected_total = 0
     next_sync = 0.0  # force a sync on the first iteration (monotonic clock)
+    next_slow = 0.0
+    next_fast = math.inf  # active only while the fast (watchlisted) set is non-empty
+    next_watch = 0.0 if watchlist_source is not None else math.inf  # inf ⇒ identical-to-today
 
     while True:
-        loop_now = asyncio.get_event_loop().time()
+        # Capture the monotonic clock ONCE per iteration so every deadline check below uses the
+        # same reference; a tier that newly activates is fired from THIS value (see the partition
+        # blocks), while a tier reschedules from loop.time() post-work so cadence trails completion.
+        t = loop.time()
+
         # --- Sync the element set when due (or on first pass) ---
-        if loop_now >= next_sync:
+        if t >= next_sync:
             wall = now()
             new_elements: list[OrbitalElement] = []
             sync_skipped = 0
@@ -432,7 +551,7 @@ async def celestrak_records(
                 # failed sync keeps the prior last-good set so the map does not go dark.
                 elements = new_elements
             rejected_total += sync_skipped
-            next_sync = asyncio.get_event_loop().time() + sync_s
+            next_sync = loop.time() + sync_s
             if sync_failed and not elements:
                 yield _status(
                     "degraded",
@@ -446,50 +565,89 @@ async def celestrak_records(
                 await asyncio.sleep(sleep_for)
                 continue
             backoff = INITIAL_BACKOFF_S
+            # Re-partition against the (possibly new) catalog; newly-non-empty fast tier fires
+            # this same wake (next_fast=t), an emptied one parks (inf) so it never wakes idle.
+            fast_elements, slow_elements = _partition(elements, fast_norads)
+            if fast_elements and next_fast == math.inf:
+                next_fast = t
+            elif not fast_elements:
+                next_fast, fast_above = math.inf, 0
 
-        # --- Propagate the current set to now and emit above-horizon objects ---
-        wall = now()
-        emitted = 0
-        skipped_prop = 0
-        above = 0
-        last_record_at: datetime | None = None
-        for element in elements:
-            record = element_to_record(
-                element,
+        # --- Re-read the watchlist (moves objects between tiers without a restart) ---
+        if watchlist_source is not None and t >= next_watch:
+            try:
+                fast_norads = await asyncio.to_thread(watchlist_source)
+            except Exception:
+                log.warning("CelesTrak watchlist refresh failed; treating as empty", exc_info=True)
+                fast_norads = set()
+            next_watch = loop.time() + watchlist_refresh_s
+            fast_elements, slow_elements = _partition(elements, fast_norads)
+            # Newly-active fast tier fires this same wake (preserve phase if already active).
+            if fast_elements and next_fast == math.inf:
+                next_fast = t
+            elif not fast_elements:
+                next_fast, fast_above = math.inf, 0
+
+        # --- Fast tier: the watchlisted subset only (smooth tracks); no status ---
+        if t >= next_fast:
+            wall = now()
+            recs, _skipped = _propagate_set(
+                fast_elements,
                 observer_lat=observer_lat,
                 observer_lon=observer_lon,
                 observer_alt_m=observer_alt_m,
                 at=wall,
                 valid_s=valid_s,
+                min_elevation_deg=min_elevation_deg,
             )
-            if record is None:
-                skipped_prop += 1
-                continue
-            elevation = record.attributes["elevation_deg"]
-            if not isinstance(elevation, (int, float)) or elevation < min_elevation_deg:
-                continue  # below the horizon floor — not emitted (ORBIT-FR-007)
-            above += 1
-            received += 1
-            emitted += 1
-            last_record_at = wall
-            yield record
+            fast_above = len(recs)
+            for r in recs:
+                received += 1
+                last_record_at = wall
+                yield r
+            next_fast = loop.time() + propagate_fast_s
 
-        yield _status(
-            "connected",
-            wall,
-            records_received=received,
-            records_rejected=rejected_total,
-            last_record_at=last_record_at,
-            attributes={
-                "tracked_objects": len(elements),
-                "above_horizon": above,
-                "emitted_this_tick": emitted,
-                "prop_skipped": skipped_prop,
-                "min_elevation_deg": min_elevation_deg,
-                "groups": list(groups),
-            },
-        )
-        await asyncio.sleep(propagate_s)
+        # --- Slow tier: the broad catalog minus the watchlist; emits the single status ---
+        if t >= next_slow:
+            wall = now()
+            recs, skipped_prop = _propagate_set(
+                slow_elements,
+                observer_lat=observer_lat,
+                observer_lon=observer_lon,
+                observer_alt_m=observer_alt_m,
+                at=wall,
+                valid_s=valid_s,
+                min_elevation_deg=min_elevation_deg,
+            )
+            for r in recs:
+                received += 1
+                last_record_at = wall
+                yield r
+            yield _status(
+                "connected",
+                wall,
+                records_received=received,
+                records_rejected=rejected_total,
+                last_record_at=last_record_at,
+                attributes={
+                    "tracked_objects": len(elements),  # TOTAL synced catalog (unchanged meaning)
+                    "above_horizon": len(recs),  # slow tier above-horizon this tick
+                    "emitted_this_tick": len(recs),
+                    "prop_skipped": skipped_prop,
+                    "min_elevation_deg": min_elevation_deg,
+                    "groups": list(groups),
+                    "watchlisted": len(fast_norads),  # orbital watchlist keys read from the DB
+                    "fast_tracked": len(fast_elements),  # watchlist ∩ synced catalog
+                    "slow_tracked": len(slow_elements),
+                    "fast_above_horizon": fast_above,  # watched subset above horizon (last tick)
+                    "propagate_fast_s": propagate_fast_s,  # cadence transparency
+                },
+            )
+            next_slow = loop.time() + propagate_s
+
+        # Sleep to the nearest active deadline; inactive tiers are math.inf and never picked.
+        deadline = min(next_sync, next_watch, next_slow, next_fast)
+        await asyncio.sleep(max(0.0, deadline - loop.time()))
 
 
 async def run_celestrak(
@@ -516,12 +674,24 @@ async def run_celestrak(
             async with connect(cfg, identifier="aether-celestrak") as bus:
                 backoff = INITIAL_BACKOFF_S  # reset once connected
                 prov = provider if provider is not None else build_provider(cfg)
+                # Two-tier (ORBIT-FR-011) only when persistence is on: gating on cfg.persist
+                # (not just relying on list_watchlist→[]) guarantees persist-off ⇒ ZERO
+                # watchlist I/O ⇒ byte-identical to the single-cadence path, and stops a
+                # leftover/foreign aether.db from silently fast-tracking objects.
+                watchlist_source = (
+                    functools.partial(_read_watchlisted_norads, cfg.db_path)
+                    if cfg.persist
+                    else None
+                )
                 log.info(
-                    "CelesTrak adapter -> %s (groups %s, sync %.0fs, propagate %.0fs, min el %.1f)",
+                    "CelesTrak adapter -> %s (groups %s, sync %.0fs, propagate %.0fs, "
+                    "fast %.1fs, two-tier %s, min el %.1f)",
                     prov.name,
                     ",".join(cfg.celestrak_groups),
                     cfg.celestrak_sync_s,
                     resolved_prop,
+                    cfg.celestrak_propagate_fast_s,
+                    watchlist_source is not None,
                     cfg.celestrak_min_elevation_deg,
                 )
                 try:
@@ -535,6 +705,9 @@ async def run_celestrak(
                         sync_s=cfg.celestrak_sync_s,
                         propagate_s=resolved_prop,
                         valid_s=cfg.celestrak_valid_s,
+                        watchlist_source=watchlist_source,
+                        propagate_fast_s=cfg.celestrak_propagate_fast_s,
+                        watchlist_refresh_s=cfg.celestrak_watchlist_refresh_s,
                     ):
                         await bus.publish_record(record)
                 except Sgp4Unavailable as exc:
