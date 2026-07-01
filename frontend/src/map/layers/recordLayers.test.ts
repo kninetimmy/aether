@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  combineLayerFilter,
   featureFeatureCollection,
   isLightningFeature,
   lightningFeatureCollection,
@@ -156,5 +157,44 @@ describe("lightning clustering split (LIGHTNING-FR-006)", () => {
     expect(isLightningFeature(feature("glm:cluster:pt", "lightning_cluster"))).toBe(true);
     expect(isLightningFeature(flash)).toBe(true);
     expect(isLightningFeature(fire)).toBe(false);
+  });
+});
+
+describe("combineLayerFilter (LayerControl visibility gate, task #59)", () => {
+  const POINT = ["==", ["geometry-type"], "Point"];
+
+  it("returns the base filter unchanged when nothing is hidden", () => {
+    expect(combineLayerFilter(POINT, [])).toBe(POINT);
+  });
+
+  it("returns null when nothing is hidden and there is no base filter", () => {
+    // tracks-point has no static base filter, so with nothing hidden it clears to null.
+    expect(combineLayerFilter(null, [])).toBeNull();
+  });
+
+  it("returns the gate alone when a base-less layer has hidden layers", () => {
+    // tracks-point: gate only — hide features whose `layer` is in the hidden set.
+    expect(combineLayerFilter(null, ["features-fire", "features-quake"])).toEqual([
+      "!",
+      ["in", ["get", "layer"], ["literal", ["features-fire", "features-quake"]]],
+    ]);
+  });
+
+  it("ANDs the base filter with the hidden-set gate when both are present", () => {
+    // features-point: the FIX — the static geometry filter is preserved AND the
+    // toggled-off layer is removed (previously the gate never reached this layer).
+    expect(combineLayerFilter(POINT, ["features-fire"])).toEqual([
+      "all",
+      POINT,
+      ["!", ["in", ["get", "layer"], ["literal", ["features-fire"]]]],
+    ]);
+  });
+
+  it("copies the hidden list into the literal (no shared reference)", () => {
+    const hidden = ["features-tfr"];
+    const out = combineLayerFilter(null, hidden) as unknown[];
+    const literal = (out[1] as unknown[])[2] as [string, string[]];
+    expect(literal[1]).toEqual(hidden);
+    expect(literal[1]).not.toBe(hidden);
   });
 });

@@ -169,6 +169,32 @@ export function lightningFeatureCollection(
   return { type: "FeatureCollection", features };
 }
 
+/** A MapLibre filter/expression, kept as a loose type so this module needs no
+ * maplibre-gl import and the combiner below stays trivially unit-testable. */
+export type LayerFilter = unknown;
+
+/** Combine a map layer's static base filter with the LayerControl visibility gate.
+ *
+ * `hiddenLayers` are the presentation-layer keys toggled OFF; any feature whose
+ * `layer` property is in that set is filtered out. When nothing is hidden the base
+ * filter is returned unchanged; when the layer has no base filter (`null`) the gate
+ * is returned alone; otherwise the two are ANDed. Pure so the visibility effect in
+ * MapView can lean on it for EVERY overlay layer — tracks AND the shared feature
+ * source (fire/quake points, TFR/NOTAM polygons) — instead of only tracks.
+ */
+export function combineLayerFilter(
+  base: LayerFilter,
+  hiddenLayers: readonly string[],
+): LayerFilter {
+  const gate =
+    hiddenLayers.length === 0
+      ? null
+      : ["!", ["in", ["get", "layer"], ["literal", [...hiddenLayers]]]];
+  if (gate === null) return base ?? null;
+  if (base === null || base === undefined) return gate;
+  return ["all", base, gate];
+}
+
 /** Distinct presentation layer ids present in current state, for layer control. */
 export function activeLayers(
   tracks: Map<string, TrackRecord>,
