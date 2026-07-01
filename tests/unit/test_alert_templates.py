@@ -95,3 +95,29 @@ def test_satellite_rise_template_targets_orbital_layer() -> None:
     }
     elev = next(c for c in rule.conditions if c.operator == "greater_than")
     assert elev.value == 10.0  # authoritative SGP4 elevation, not the flat-earth helper
+
+
+def test_satellite_culmination_template_targets_orbital_layer() -> None:
+    rule = {t.id: t for t in default_rule_templates(T0)}["rule-satellite-culmination"]
+    assert rule.subject_types == ["orbital_object"]
+    assert rule.transition == "enter"  # rising edge lands on an ordinary fast-tier tick (#18)
+    assert rule.enabled is False  # ALERT-FR-008
+    assert rule.geofence_id is None  # scoped by the watchlist leaf, not a fence
+    assert {(c.field, c.operator) for c in rule.conditions} == {
+        ("attributes.pass_culmination_at", "culmination_reached"),
+        ("watchlist", "watchlist"),
+    }
+
+
+def test_satellite_pass_end_template_targets_orbital_layer() -> None:
+    rule = {t.id: t for t in default_rule_templates(T0)}["rule-satellite-pass-end"]
+    assert rule.subject_types == ["orbital_object"]
+    assert rule.transition == "exit"  # first exit-transition template in the repo (#19)
+    assert rule.enabled is False  # ALERT-FR-008
+    ops = {(c.field, c.operator) for c in rule.conditions}
+    assert ops == {
+        ("attributes.elevation_deg", "greater_than"),
+        ("watchlist", "watchlist"),
+    }
+    elev = next(c for c in rule.conditions if c.operator == "greater_than")
+    assert elev.value == 10.0

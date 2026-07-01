@@ -312,6 +312,13 @@ function humanAge(s: number): string {
   return `${(s / 86400).toFixed(1)} d`;
 }
 
+/** Signed human time-delta from now: future "in 12 min", past "12 min ago", "now". */
+function humanRelative(deltaS: number): string {
+  if (Math.abs(deltaS) < 1) return "now";
+  const mag = humanAge(Math.abs(deltaS));
+  return deltaS >= 0 ? `in ${mag}` : `${mag} ago`;
+}
+
 function pushStr(out: DetailField[], track: TrackRecord, key: string, label: string): void {
   const v = strAttr(track, key);
   if (v && v.trim()) out.push({ label, value: v });
@@ -586,6 +593,35 @@ export function trackDetails(track: TrackRecord): DetailGroup[] {
             },
           ],
         });
+      const pass: DetailField[] = [];
+      const nowMs = Date.now();
+      const passTimeField = (key: string, label: string): void => {
+        const iso = strAttr(track, key);
+        if (!iso) return; // absent → omit (defensive; no fake values)
+        const ms = Date.parse(iso);
+        if (Number.isNaN(ms)) return;
+        pass.push({
+          label,
+          value: humanRelative((ms - nowMs) / 1000),
+          title: new Date(ms).toLocaleTimeString(),
+        });
+      };
+      passTimeField("pass_rise_at", "Rise");
+      const culmIso = strAttr(track, "pass_culmination_at");
+      if (culmIso) {
+        const ms = Date.parse(culmIso);
+        if (!Number.isNaN(ms)) {
+          const maxEl = numAttr(track, "pass_max_elevation_deg");
+          const rel = humanRelative((ms - nowMs) / 1000);
+          pass.push({
+            label: "Culmination",
+            value: maxEl != null ? `${rel} (max ${fmt(maxEl, 0)}°)` : rel,
+            title: new Date(ms).toLocaleTimeString(),
+          });
+        }
+      }
+      passTimeField("pass_set_at", "Set");
+      if (pass.length) groups.push({ heading: "Pass (predicted)", fields: pass });
       break;
     }
     case "vessel": {
