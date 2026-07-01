@@ -51,6 +51,7 @@ from aether.backend.hub import Connection, Hub
 from aether.backend.notifications_api import build_notifications_router
 from aether.backend.protocol import snapshot_message
 from aether.backend.replay_api import build_replay_router
+from aether.backend.security import SecurityMiddleware, trusted_hosts
 from aether.backend.subscription import default_filter, parse_subscribe
 from aether.backend.watchlist_api import build_watchlist_router
 from aether.bus.client import DEFAULT_RECONNECT_S, connect, run_record_subscriber
@@ -245,6 +246,17 @@ def create_app(*, settings: Settings | None = None, demo_interval_s: float = 1.0
                 )
 
     app = FastAPI(title="aether COP", version="0.1.0", lifespan=lifespan)
+    # Outermost guard (M7.1, PRD §26.2): validates Host/Origin on every /api/* and
+    # /ws/v2 request and stamps CSP + hardening headers on responses. A pure ASGI
+    # middleware so it covers the websocket handshake, not just HTTP. Off by default
+    # under direct Settings() construction (unit tests); from_env() turns it on for
+    # real deployments — see Settings.security_enabled.
+    app.add_middleware(
+        SecurityMiddleware,
+        allowed_hosts=trusted_hosts(cfg),
+        content_security_policy=cfg.content_security_policy,
+        enabled=cfg.security_enabled,
+    )
     app.include_router(build_geofence_router(cfg, hub, engine))
     app.include_router(build_watchlist_router(cfg, engine))
     app.include_router(build_alert_rules_router(cfg, hub, engine))
