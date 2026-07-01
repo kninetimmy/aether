@@ -48,7 +48,10 @@ def _peak_rss_mb() -> float | None:
         import resource
     except ImportError:
         return None
-    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024  # KB→MB on Linux
+    raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    if sys.platform == "darwin":  # ru_maxrss is bytes on macOS, KB on Linux
+        return raw / (1024 * 1024)
+    return raw / 1024  # KB→MB on Linux
 
 
 def _get(url: str, timeout_s: float = 30.0) -> bytes:
