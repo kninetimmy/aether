@@ -5,9 +5,13 @@
 // the basemap. Circle/area layers only for now — heading rotation and sprite
 // symbols are a later refinement.
 
-import maplibregl, { type Map as MlMap } from "maplibre-gl";
+import maplibregl, {
+  type FilterSpecification,
+  type Map as MlMap,
+} from "maplibre-gl";
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import {
+  combineLayerFilter,
   featureFeatureCollection,
   lightningFeatureCollection,
   trackFeatureCollection,
@@ -41,6 +45,23 @@ const LIGHTNING_LAYER_IDS = [
   "lightning-cluster-count",
   "lightning-flash",
 ] as const;
+
+// Static geometry-type gates for the shared feature source: polygons render on the
+// fill/outline layers, points on the circle layer. Held as constants so the layer
+// definitions AND the visibility effect (which ANDs each with the LayerControl
+// hidden-set gate) share one source of truth.
+const FEATURE_POLYGON_FILTER = [
+  "match",
+  ["geometry-type"],
+  ["Polygon", "MultiPolygon"],
+  true,
+  false,
+] as unknown as FilterSpecification;
+const FEATURE_POINT_FILTER = [
+  "==",
+  ["geometry-type"],
+  "Point",
+] as unknown as FilterSpecification;
 
 // Build a MapLibre `step` expression from a {base, steps:[stop,output]} ramp:
 // step(input, base, stop0, out0, stop1, out1, …). Lets the centralized lightning
@@ -213,7 +234,7 @@ export function MapView() {
           id: "features-fill",
           type: "fill",
           source: FEATURE_SOURCE,
-          filter: ["match", ["geometry-type"], ["Polygon", "MultiPolygon"], true, false],
+          filter: FEATURE_POLYGON_FILTER,
           paint: { "fill-color": ["get", "color"], "fill-opacity": 0.18 },
         });
       if (!map.getLayer("features-outline"))
@@ -221,7 +242,7 @@ export function MapView() {
           id: "features-outline",
           type: "line",
           source: FEATURE_SOURCE,
-          filter: ["match", ["geometry-type"], ["Polygon", "MultiPolygon"], true, false],
+          filter: FEATURE_POLYGON_FILTER,
           paint: { "line-color": ["get", "color"], "line-width": 1.5 },
         });
       if (!map.getLayer("features-point"))
@@ -229,7 +250,7 @@ export function MapView() {
           id: "features-point",
           type: "circle",
           source: FEATURE_SOURCE,
-          filter: ["==", ["geometry-type"], "Point"],
+          filter: FEATURE_POINT_FILTER,
           paint: {
             "circle-radius": 4,
             "circle-color": ["get", "color"],
@@ -435,20 +456,36 @@ export function MapView() {
     const hidden = Object.keys(layerVisible).filter(
       (l) => !isLayerVisible(state, l),
     );
-    const layerHidden =
-      hidden.length === 0
-        ? null
-        : (["!", ["in", ["get", "layer"], ["literal", hidden]]] as const);
-    // tracks-point: hide whole layers toggled off.
+    // Each overlay layer's filter = its static base filter ANDed with the
+    // hidden-set gate (combineLayerFilter), so toggling a layer off in LayerControl
+    // removes exactly its features. Base filter null ⇒ the whole layer is gated.
+    // tracks-point: no base filter, so it's the gate alone (or null when nothing hidden).
     if (map.getLayer("tracks-point")) {
-      map.setFilter("tracks-point", (layerHidden as never) ?? null);
+      map.setFilter("tracks-point", combineLayerFilter(null, hidden) as never);
     }
     // tracks-highlight must keep its isToi gate AND honor the SAME layer-visibility
     // filter, so a TOI on a hidden layer shows no ring (it can't reappear).
     if (map.getLayer("tracks-highlight")) {
-      const isToi = ["==", ["get", "isToi"], true] as const;
-      const combined = layerHidden ? ["all", isToi, layerHidden] : isToi;
-      map.setFilter("tracks-highlight", combined as never);
+      const isToi = ["==", ["get", "isToi"], true];
+      map.setFilter("tracks-highlight", combineLayerFilter(isToi, hidden) as never);
+    }
+    // The shared feature source (fire/quake points, TFR/NOTAM polygons) also honors
+    // LayerControl now: AND the hidden-set gate onto each layer's static geometry
+    // base filter. Previously these three ignored the toggle entirely, so hiding
+    // e.g. "Fire detections" or "TFRs" did nothing on the map.
+    for (const id of ["features-fill", "features-outline"] as const) {
+      if (map.getLayer(id)) {
+        map.setFilter(
+          id,
+          combineLayerFilter(FEATURE_POLYGON_FILTER, hidden) as never,
+        );
+      }
+    }
+    if (map.getLayer("features-point")) {
+      map.setFilter(
+        "features-point",
+        combineLayerFilter(FEATURE_POINT_FILTER, hidden) as never,
+      );
     }
     // The lightning layers come from a separate clustered source, so a per-feature
     // `layer`-property filter can't reach them (clusters MapLibre synthesizes carry
