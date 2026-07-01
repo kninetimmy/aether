@@ -64,6 +64,7 @@ import aiomqtt
 
 from aether.bus.client import connect
 from aether.config import Settings
+from aether.orbital.pass_prediction import PassPrediction, predict_next_pass
 from aether.orbital.sgp4_propagate import (
     OmmInitError,
     Sgp4Unavailable,
@@ -94,6 +95,11 @@ DEFAULT_BASE_URL = "https://celestrak.org"
 #: Jittered exponential backoff bounds — shared shape with every other adapter (§17.1).
 INITIAL_BACKOFF_S = 1.0
 MAX_BACKOFF_S = 60.0
+
+#: Re-attempt a failed/absent pass prediction no more often than this (s). A ~24h scan is too
+#: costly to re-run on every 2s fast tick for a decayed object or one with genuinely no pass
+#: in the search window (M6.8, PRD §32 #18/#19).
+PASS_PREDICT_RETRY_S = 60.0
 
 #: Provider-name aliases selecting the in-process no-hardware feeder.
 _FAKE_PROVIDER_NAMES = frozenset({"fake", "demo"})
@@ -287,6 +293,7 @@ def element_to_record(
     observer_alt_m: float,
     at: datetime,
     valid_s: float,
+    prediction: PassPrediction | None = None,
 ) -> TrackRecord | None:
     """Propagate one element to ``at`` and normalize to an ``orbital_object`` ``TrackRecord``.
 
@@ -294,6 +301,14 @@ def element_to_record(
     never plotted — fail-visibly, §37). ``predicted=True`` and ``locally_received=False``;
     az/el/range/epoch/age live in ``attributes`` because the schema is ``extra="forbid"`` (no
     new top-level fields, no ``SCHEMA_VERSION`` bump — the maintainer-approved approach).
+
+    ``prediction`` (M6.8, PRD §32 #18/#19) is the cached next/in-progress pass for this object,
+    attached as ``pass_culmination_at``/``pass_max_elevation_deg`` (always present together)
+    plus ``pass_rise_at``/``pass_set_at`` (each present only when that floor crossing falls
+    inside the search window). Defaults to ``None`` so the slow tier — which never computes
+    predictions — and every existing caller/test/bench stay byte-identical. When ``None`` the
+    ``pass_*`` keys are omitted entirely rather than emitted as null/fake values (honest-
+    unevaluable, §37).
     """
     state = propagate(
         element.satrec,
@@ -307,6 +322,26 @@ def element_to_record(
 
     rid = f"orbital:celestrak:{element.norad_id}"
     age_s = (at - element.epoch).total_seconds()
+    attributes: dict[str, Any] = {
+        "norad_id": element.norad_id,
+        "object_id": element.object_id,
+        "object_name": element.object_name,
+        "group": element.group,
+        "element_epoch_utc": element.epoch.isoformat(),
+        "element_age_s": age_s,
+        "azimuth_deg": state.azimuth_deg,
+        "elevation_deg": state.elevation_deg,
+        "slant_range_m": state.slant_range_m,
+        "attribution": ATTRIBUTION,
+        "caveat": CAVEAT,
+    }
+    if prediction is not None:
+        attributes["pass_culmination_at"] = prediction.culmination_at.isoformat()
+        attributes["pass_max_elevation_deg"] = prediction.max_elevation_deg
+        if prediction.rise_at is not None:
+            attributes["pass_rise_at"] = prediction.rise_at.isoformat()
+        if prediction.set_at is not None:
+            attributes["pass_set_at"] = prediction.set_at.isoformat()
     return TrackRecord(
         id=rid,
         source=SOURCE,
@@ -333,19 +368,7 @@ def element_to_record(
             )
         ],
         tags=["orbital", "celestrak", element.group],
-        attributes={
-            "norad_id": element.norad_id,
-            "object_id": element.object_id,
-            "object_name": element.object_name,
-            "group": element.group,
-            "element_epoch_utc": element.epoch.isoformat(),
-            "element_age_s": age_s,
-            "azimuth_deg": state.azimuth_deg,
-            "elevation_deg": state.elevation_deg,
-            "slant_range_m": state.slant_range_m,
-            "attribution": ATTRIBUTION,
-            "caveat": CAVEAT,
-        },
+        attributes=attributes,
     )
 
 
@@ -418,6 +441,149 @@ def _partition(
     return fast, slow
 
 
+def _prune_pass_cache(
+    pass_cache: dict[int, PassPrediction | None],
+    pass_retry_at: dict[int, float],
+    fast_elements: list[OrbitalElement],
+) -> None:
+    """Drop cache/backoff entries for NORAD ids no longer on the fast tier (M6.8).
+
+    Called after every re-:func:`_partition` (a sync or a watchlist refresh): a watchlisted
+    object that is de-watchlisted, or that drops out of the synced catalog entirely, must not
+    leave its prediction/backoff entry behind forever — otherwise the two NORAD-keyed maps only
+    grow for the life of the connection (bounded only by total catalog size, PRD §37 bounded
+    maps). Keeps just the CURRENT fast set; a re-watchlisted object gets a fresh cold-cache
+    recompute rather than resurrecting a stale one.
+    """
+    keep = {e.norad_id for e in fast_elements}
+    for nid in [n for n in pass_cache if n not in keep]:
+        del pass_cache[nid]
+    for nid in [n for n in pass_retry_at if n not in keep]:
+        del pass_retry_at[nid]
+
+
+def _update_pass_cache(
+    fast_elements: list[OrbitalElement],
+    pass_cache: dict[int, PassPrediction | None],
+    pass_retry_at: dict[int, float],
+    *,
+    observer_lat: float,
+    observer_lon: float,
+    observer_alt_m: float,
+    wall: datetime,
+    loop_time: float,
+    min_elevation_deg: float,
+) -> None:
+    """Recompute at most ONE watchlisted object's pass prediction this fast tick (M6.8).
+
+    ``pass_cache``/``pass_retry_at`` are mutated in place (NORAD-keyed, loop-scope state owned
+    by :func:`celestrak_records`). An object "needs recompute" when (a) it has never been
+    predicted yet, (b) its cached prediction is ``None`` (decayed object, or genuinely no pass
+    in the search window) and the retry backoff (:data:`PASS_PREDICT_RETRY_S`) has elapsed, or
+    (c) its cached pass has a ``set_at`` AND ``wall`` is past it AND the object's CURRENT
+    elevation has actually dropped below ``min_elevation_deg`` — gating on the real floor
+    crossing (one extra ``propagate`` call, already cheap per-tick) rather than purely on the
+    predicted ``set_at`` closes the race where an optimistic-by-a-few-seconds prediction would
+    silently swap in next-pass data while the object is still above the floor mid-pass.
+
+    Only ONE element is actually recomputed (the ~24h scan) per tick — amortized so a resync
+    that invalidates every cache entry at once never recomputes the whole watchlist in the same
+    tick (it ramps up over a few ticks instead). (a) and (c) are treated as URGENT and win the
+    slot immediately, in list order; (b) is a lower-priority fallback, only taken when nothing
+    urgent needs the slot this tick. Without this priority split, a watchlist heavy in objects
+    that genuinely never pass (cached ``None``, endlessly retried every
+    :data:`PASS_PREDICT_RETRY_S`) could starve a real object's (c) recompute out of the single
+    per-tick slot for its whole below-floor inter-pass gap — by the time the object rises again
+    for its next pass, (c)'s own gate (``cur_elev < floor``) can no longer fire, so the cache
+    would keep serving the PREVIOUS pass's (by-then-past) rise/culmination/set for the entire
+    new pass. Scanning the whole list every tick (rather than stopping at the first (b)
+    candidate) costs at most one extra cheap single-instant ``propagate`` call per already-set
+    object already being checked for (c) — never an extra ~24h scan.
+    """
+    retry_candidate: OrbitalElement | None = None
+    for element in fast_elements:
+        nid = element.norad_id
+        if nid not in pass_cache:
+            _recompute_pass(
+                element,
+                pass_cache,
+                pass_retry_at,
+                observer_lat=observer_lat,
+                observer_lon=observer_lon,
+                observer_alt_m=observer_alt_m,
+                wall=wall,
+                loop_time=loop_time,
+                min_elevation_deg=min_elevation_deg,
+            )
+            return
+        cached = pass_cache[nid]
+        if cached is not None and cached.set_at is not None and wall >= cached.set_at:
+            cur_state = propagate(
+                element.satrec,
+                wall,
+                observer_lat_deg=observer_lat,
+                observer_lon_deg=observer_lon,
+                observer_alt_m=observer_alt_m,
+            )
+            cur_elev = cur_state.elevation_deg if cur_state is not None else None
+            if cur_elev is None or cur_elev < min_elevation_deg:
+                _recompute_pass(
+                    element,
+                    pass_cache,
+                    pass_retry_at,
+                    observer_lat=observer_lat,
+                    observer_lon=observer_lon,
+                    observer_alt_m=observer_alt_m,
+                    wall=wall,
+                    loop_time=loop_time,
+                    min_elevation_deg=min_elevation_deg,
+                )
+                return
+        elif (
+            cached is None and retry_candidate is None and loop_time >= pass_retry_at.get(nid, 0.0)
+        ):
+            retry_candidate = element  # lowest priority — only used if nothing urgent is found
+
+    if retry_candidate is not None:
+        _recompute_pass(
+            retry_candidate,
+            pass_cache,
+            pass_retry_at,
+            observer_lat=observer_lat,
+            observer_lon=observer_lon,
+            observer_alt_m=observer_alt_m,
+            wall=wall,
+            loop_time=loop_time,
+            min_elevation_deg=min_elevation_deg,
+        )
+
+
+def _recompute_pass(
+    element: OrbitalElement,
+    pass_cache: dict[int, PassPrediction | None],
+    pass_retry_at: dict[int, float],
+    *,
+    observer_lat: float,
+    observer_lon: float,
+    observer_alt_m: float,
+    wall: datetime,
+    loop_time: float,
+    min_elevation_deg: float,
+) -> None:
+    """Run the ~24h pass-prediction scan for one object and cache the result (M6.8)."""
+    pred = predict_next_pass(
+        element.satrec,
+        wall,
+        observer_lat_deg=observer_lat,
+        observer_lon_deg=observer_lon,
+        observer_alt_m=observer_alt_m,
+        min_elevation_deg=min_elevation_deg,
+    )
+    pass_cache[element.norad_id] = pred
+    if pred is None:
+        pass_retry_at[element.norad_id] = loop_time + PASS_PREDICT_RETRY_S
+
+
 def _propagate_set(
     subset: list[OrbitalElement],
     *,
@@ -427,16 +593,22 @@ def _propagate_set(
     at: datetime,
     valid_s: float,
     min_elevation_deg: float,
+    predictions: dict[int, PassPrediction] | None = None,
 ) -> tuple[list[TrackRecord], int]:
     """Propagate a subset to ``at``; return ``(above-horizon records, prop_skipped)``.
 
     Lifted verbatim from the original inner ``for element in elements:`` block: a ``None``
     propagation (NaN/decayed) is skipped and counted; an object below the elevation floor is
     dropped (ORBIT-FR-007). Shared by both tiers so they apply identical filtering.
+
+    ``predictions`` (M6.8) is a NORAD-keyed cache of next/in-progress passes, looked up per
+    element and threaded through to :func:`element_to_record`. Defaults to ``None`` — the slow
+    tier never computes predictions, so its call site is byte-identical to before this slice.
     """
     out: list[TrackRecord] = []
     skipped = 0
     for element in subset:
+        pred = predictions.get(element.norad_id) if predictions else None
         record = element_to_record(
             element,
             observer_lat=observer_lat,
@@ -444,6 +616,7 @@ def _propagate_set(
             observer_alt_m=observer_alt_m,
             at=at,
             valid_s=valid_s,
+            prediction=pred,
         )
         if record is None:
             skipped += 1
@@ -496,6 +669,15 @@ async def celestrak_records(
     ``sgp4`` parser propagates as :class:`Sgp4Unavailable` to :func:`run_celestrak` (the
     capability gate). Failure isolation throughout (PRD §17.4/§37) — a watchlist read error is
     logged and treated as empty, never crashing the adapter.
+
+    **Pass prediction (M6.8, PRD §32 #18/#19):** the fast tier additionally maintains a NORAD-
+    keyed cache of the next/in-progress observer pass (rise/culmination/set) for each watchlisted
+    object, computed by :func:`aether.orbital.pass_prediction.predict_next_pass` and attached as
+    ``pass_culmination_at``/``pass_max_elevation_deg``/``pass_rise_at``/``pass_set_at``
+    attributes (see :func:`element_to_record`). The cache lives for the generator's connection
+    lifetime (rebuilt on reconnect) and is recomputed lazily — at most one watchlisted object's
+    ~24h scan per fast tick (see :func:`_update_pass_cache`) — never the broad catalog, and never
+    the whole watchlist at once even after a resync invalidates every entry.
     """
     now = now_fn or _now
     yield _status("starting", now())
@@ -506,6 +688,8 @@ async def celestrak_records(
     slow_elements: list[OrbitalElement] = []
     fast_norads: set[int] = set()
     fast_above = 0
+    pass_cache: dict[int, PassPrediction | None] = {}  # norad -> next/in-progress pass (M6.8)
+    pass_retry_at: dict[int, float] = {}  # norad -> earliest loop.time() to retry a None cache
     last_record_at: datetime | None = None
     received = 0
     rejected_total = 0
@@ -568,6 +752,7 @@ async def celestrak_records(
             # Re-partition against the (possibly new) catalog; newly-non-empty fast tier fires
             # this same wake (next_fast=t), an emptied one parks (inf) so it never wakes idle.
             fast_elements, slow_elements = _partition(elements, fast_norads)
+            _prune_pass_cache(pass_cache, pass_retry_at, fast_elements)
             if fast_elements and next_fast == math.inf:
                 next_fast = t
             elif not fast_elements:
@@ -582,6 +767,7 @@ async def celestrak_records(
                 fast_norads = set()
             next_watch = loop.time() + watchlist_refresh_s
             fast_elements, slow_elements = _partition(elements, fast_norads)
+            _prune_pass_cache(pass_cache, pass_retry_at, fast_elements)
             # Newly-active fast tier fires this same wake (preserve phase if already active).
             if fast_elements and next_fast == math.inf:
                 next_fast = t
@@ -591,6 +777,23 @@ async def celestrak_records(
         # --- Fast tier: the watchlisted subset only (smooth tracks); no status ---
         if t >= next_fast:
             wall = now()
+            # Pass prediction (M6.8): at most one watchlisted object's ~24h scan per tick.
+            _update_pass_cache(
+                fast_elements,
+                pass_cache,
+                pass_retry_at,
+                observer_lat=observer_lat,
+                observer_lon=observer_lon,
+                observer_alt_m=observer_alt_m,
+                wall=wall,
+                loop_time=t,
+                min_elevation_deg=min_elevation_deg,
+            )
+            predictions: dict[int, PassPrediction] = {}
+            for element in fast_elements:
+                pred = pass_cache.get(element.norad_id)
+                if pred is not None:
+                    predictions[element.norad_id] = pred
             recs, _skipped = _propagate_set(
                 fast_elements,
                 observer_lat=observer_lat,
@@ -599,6 +802,7 @@ async def celestrak_records(
                 at=wall,
                 valid_s=valid_s,
                 min_elevation_deg=min_elevation_deg,
+                predictions=predictions,
             )
             fast_above = len(recs)
             for r in recs:

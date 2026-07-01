@@ -1,16 +1,18 @@
-"""Unit tests for the CelesTrak orbital adapter (PRD §11.14, §18.12, M6.5).
+"""Unit tests for the CelesTrak orbital adapter (PRD §11.14, §18.12, M6.5, M6.8).
 
 Covers the pure OMM→Satrec build (valid + malformed rows), epoch parsing, the propagate→
 record normalizer (predicted labeling, attributes-only az/el/range/epoch/age, no schema
 bump), the runtime — elevation filtering, last-good cache, sync/fetch failure isolation, the
-301/403/404 no-retry guard, and provider selection — and the missing-``sgp4`` capability gate.
+301/403/404 no-retry guard, and provider selection — the missing-``sgp4`` capability gate —
+and (M6.8) the fast-tier pass-prediction cache: attribute attachment, the recompute/backoff
+gate, and the actual-floor-crossing race-window guard.
 The real SGP4 path is exercised via the fake feeder (so this needs the ``[orbital]`` extra);
 the capability gate is tested by stubbing ``build_satrec`` to raise. No broker, no live call.
 """
 
 import asyncio
 import dataclasses
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +22,10 @@ from aether.adapters.celestrak import (
     SOURCE,
     CelestrakHttpProvider,
     CelestrakNoRetry,
+    OrbitalElement,
+    _prune_pass_cache,
     _read_watchlisted_norads,
+    _update_pass_cache,
     build_provider,
     build_satrecs,
     celestrak_records,
@@ -29,6 +34,7 @@ from aether.adapters.celestrak import (
 )
 from aether.adapters.celestrak_fake_feeder import FakeCelestrakProvider
 from aether.config import Settings
+from aether.orbital.pass_prediction import PassPrediction
 from aether.orbital.sgp4_propagate import Sgp4Unavailable
 from aether.persist.database import Database
 from aether.persist.watchlist import upsert_watchlist_entry
@@ -507,3 +513,323 @@ def test_watchlist_read_error_is_isolated() -> None:
     assert status.attributes["fast_tracked"] == 0  # treated as empty
     names = {t.attributes["object_name"] for t in _tracks(records)}
     assert "AETHER-GEO-OVERHEAD" in names  # slow tier still emitted it (degraded single tier)
+
+
+# --- Pass prediction attribute attachment (M6.8, PRD §32 #18/#19) --------------
+
+
+def _overhead_element() -> OrbitalElement:
+    rows = asyncio.run(_one_group_rows())
+    elements, _ = build_satrecs(rows, group="stations")
+    return next(e for e in elements if e.object_name == "AETHER-GEO-OVERHEAD")
+
+
+def test_element_to_record_attaches_full_prediction() -> None:
+    overhead = _overhead_element()
+    prediction = PassPrediction(
+        rise_at=NOW - timedelta(minutes=5),
+        culmination_at=NOW,
+        set_at=NOW + timedelta(minutes=5),
+        max_elevation_deg=45.0,
+    )
+    rec = element_to_record(
+        overhead,
+        observer_lat=OBS_LAT,
+        observer_lon=OBS_LON,
+        observer_alt_m=0.0,
+        at=NOW,
+        valid_s=30.0,
+        prediction=prediction,
+    )
+    assert rec is not None
+    attrs = rec.attributes
+    assert attrs["pass_culmination_at"] == prediction.culmination_at.isoformat()
+    assert attrs["pass_max_elevation_deg"] == 45.0
+    assert attrs["pass_rise_at"] == prediction.rise_at.isoformat()  # type: ignore[union-attr]
+    assert attrs["pass_set_at"] == prediction.set_at.isoformat()  # type: ignore[union-attr]
+
+
+def test_element_to_record_omits_rise_set_when_in_progress() -> None:
+    # An in-progress / GEO-always-above pass has no rise/set crossing in the search window.
+    overhead = _overhead_element()
+    prediction = PassPrediction(
+        rise_at=None,
+        culmination_at=NOW,
+        set_at=None,
+        max_elevation_deg=80.0,
+    )
+    rec = element_to_record(
+        overhead,
+        observer_lat=OBS_LAT,
+        observer_lon=OBS_LON,
+        observer_alt_m=0.0,
+        at=NOW,
+        valid_s=30.0,
+        prediction=prediction,
+    )
+    assert rec is not None
+    attrs = rec.attributes
+    assert attrs["pass_culmination_at"] == prediction.culmination_at.isoformat()
+    assert attrs["pass_max_elevation_deg"] == 80.0
+    assert "pass_rise_at" not in attrs
+    assert "pass_set_at" not in attrs
+
+
+def test_element_to_record_default_prediction_emits_no_pass_keys() -> None:
+    # prediction=None (the default, every existing caller) emits NO pass_* keys at all — honest
+    # unevaluable, never null/fake values (§37).
+    overhead = _overhead_element()
+    rec = element_to_record(
+        overhead,
+        observer_lat=OBS_LAT,
+        observer_lon=OBS_LON,
+        observer_alt_m=0.0,
+        at=NOW,
+        valid_s=30.0,
+    )
+    assert rec is not None
+    for key in ("pass_culmination_at", "pass_max_elevation_deg", "pass_rise_at", "pass_set_at"):
+        assert key not in rec.attributes
+
+
+# --- Pass prediction cache + recompute gate (M6.8) -----------------------------
+
+
+def test_update_pass_cache_recomputes_once_then_backs_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from aether.adapters import celestrak as mod
+
+    overhead = _overhead_element()
+    calls: list[int] = []
+
+    def _no_pass(satrec: Any, start: datetime, **_: Any) -> PassPrediction | None:
+        calls.append(1)
+        return None  # decayed object / genuinely no pass in the window
+
+    monkeypatch.setattr(mod, "predict_next_pass", _no_pass)
+
+    pass_cache: dict[int, PassPrediction | None] = {}
+    pass_retry_at: dict[int, float] = {}
+
+    # Never cached -> forced recompute (call #1); result is None -> a retry deadline is set.
+    _update_pass_cache(
+        [overhead],
+        pass_cache,
+        pass_retry_at,
+        observer_lat=OBS_LAT,
+        observer_lon=OBS_LON,
+        observer_alt_m=0.0,
+        wall=NOW,
+        loop_time=0.0,
+        min_elevation_deg=10.0,
+    )
+    assert len(calls) == 1
+    assert pass_cache[overhead.norad_id] is None
+    assert pass_retry_at[overhead.norad_id] == mod.PASS_PREDICT_RETRY_S
+
+    # Backoff not yet elapsed -> no recompute.
+    _update_pass_cache(
+        [overhead],
+        pass_cache,
+        pass_retry_at,
+        observer_lat=OBS_LAT,
+        observer_lon=OBS_LON,
+        observer_alt_m=0.0,
+        wall=NOW,
+        loop_time=1.0,
+        min_elevation_deg=10.0,
+    )
+    assert len(calls) == 1  # still just the one call
+
+    # Backoff elapsed -> recompute again.
+    _update_pass_cache(
+        [overhead],
+        pass_cache,
+        pass_retry_at,
+        observer_lat=OBS_LAT,
+        observer_lon=OBS_LON,
+        observer_alt_m=0.0,
+        wall=NOW,
+        loop_time=mod.PASS_PREDICT_RETRY_S + 1.0,
+        min_elevation_deg=10.0,
+    )
+    assert len(calls) == 2
+
+
+def test_update_pass_cache_recompute_gated_on_actual_floor_crossing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Gating purely on `now >= cached.set_at` would recompute (and silently swap in next-pass
+    # data) slightly before the object has actually set if the prediction is a few seconds
+    # optimistic. The gate must also require the CURRENT elevation to be below the floor.
+    from aether.adapters import celestrak as mod
+
+    overhead = _overhead_element()
+    calls: list[int] = []
+
+    def _short_pass(satrec: Any, start: datetime, **_: Any) -> PassPrediction:
+        calls.append(1)
+        return PassPrediction(
+            rise_at=None,
+            culmination_at=start,
+            set_at=start + timedelta(seconds=10),
+            max_elevation_deg=80.0,
+        )
+
+    monkeypatch.setattr(mod, "predict_next_pass", _short_pass)
+
+    pass_cache: dict[int, PassPrediction | None] = {}
+    pass_retry_at: dict[int, float] = {}
+
+    _update_pass_cache(
+        [overhead],
+        pass_cache,
+        pass_retry_at,
+        observer_lat=OBS_LAT,
+        observer_lon=OBS_LON,
+        observer_alt_m=0.0,
+        wall=NOW,
+        loop_time=0.0,
+        min_elevation_deg=10.0,
+    )
+    assert len(calls) == 1
+    cached = pass_cache[overhead.norad_id]
+    assert cached is not None and cached.set_at == NOW + timedelta(seconds=10)
+
+    # wall is now past the predicted set_at, but the overhead GEO is reliably still above the
+    # floor for this observer — the real elevation gate must suppress the recompute.
+    _update_pass_cache(
+        [overhead],
+        pass_cache,
+        pass_retry_at,
+        observer_lat=OBS_LAT,
+        observer_lon=OBS_LON,
+        observer_alt_m=0.0,
+        wall=NOW + timedelta(seconds=20),
+        loop_time=20.0,
+        min_elevation_deg=10.0,
+    )
+    assert len(calls) == 1  # no recompute — still above the floor in reality
+
+
+def test_update_pass_cache_urgent_recompute_not_starved_by_none_retry_backlog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Reviewer finding (M6.8 fix pass): a watchlist heavy in objects that genuinely never pass
+    # (cached None, endlessly retried on PASS_PREDICT_RETRY_S) must not consume the single
+    # per-tick recompute slot ahead of a DIFFERENT, real object whose cached pass has actually
+    # set (an urgent, actual-floor-crossing recompute) — regardless of catalog order. Otherwise
+    # the real object's cache would keep serving a past pass's rise/culmination/set once it
+    # rises again for its next pass.
+    from aether.adapters import celestrak as mod
+
+    never_passes = OrbitalElement(
+        norad_id=1,
+        object_id="never",
+        object_name="never-passes",
+        group="g",
+        epoch=NOW,
+        satrec=object(),
+    )
+    real = OrbitalElement(
+        norad_id=2,
+        object_id="real",
+        object_name="real-object",
+        group="g",
+        epoch=NOW,
+        satrec=object(),
+    )
+
+    pass_cache: dict[int, PassPrediction | None] = {
+        never_passes.norad_id: None,  # genuinely no pass — endless None-retry candidate
+        real.norad_id: PassPrediction(
+            rise_at=None,
+            culmination_at=NOW - timedelta(minutes=10),
+            set_at=NOW - timedelta(minutes=1),  # already past — set_at gate condition holds
+            max_elevation_deg=45.0,
+        ),
+    }
+    # `never_passes`'s retry backoff is already due this tick — in the old first-match-wins
+    # scan (it comes FIRST in the list) it would win the single slot every tick, forever.
+    pass_retry_at: dict[int, float] = {never_passes.norad_id: 0.0}
+
+    def _fake_propagate(satrec: Any, when: datetime, **kwargs: Any) -> Any:
+        assert satrec is real.satrec  # only `real`'s actual-floor gate check should ever run
+        return type("S", (), {"elevation_deg": 1.0})()  # genuinely below the floor — has set
+
+    recomputed: list[int] = []
+
+    def _fake_predict(satrec: Any, start: datetime, **kwargs: Any) -> PassPrediction | None:
+        recomputed.append(real.norad_id if satrec is real.satrec else never_passes.norad_id)
+        return PassPrediction(
+            rise_at=None,
+            culmination_at=start,
+            set_at=start + timedelta(minutes=10),
+            max_elevation_deg=50.0,
+        )
+
+    monkeypatch.setattr(mod, "propagate", _fake_propagate)
+    monkeypatch.setattr(mod, "predict_next_pass", _fake_predict)
+
+    _update_pass_cache(
+        [never_passes, real],  # `never_passes` listed FIRST — order must not matter
+        pass_cache,
+        pass_retry_at,
+        observer_lat=OBS_LAT,
+        observer_lon=OBS_LON,
+        observer_alt_m=0.0,
+        wall=NOW,
+        loop_time=100.0,
+        min_elevation_deg=10.0,
+    )
+
+    # `real`'s urgent (actual-set) recompute wins the slot this tick, not `never_passes`'s due
+    # retry.
+    assert recomputed == [real.norad_id]
+    assert pass_cache[real.norad_id] is not None
+    assert pass_cache[real.norad_id].set_at == NOW + timedelta(minutes=10)  # type: ignore[union-attr]
+
+
+def test_prune_pass_cache_drops_entries_no_longer_on_the_fast_tier() -> None:
+    # A de-watchlisted (or resync-dropped) NORAD id's cache/backoff entry must not linger
+    # forever — otherwise the two NORAD-keyed maps only grow for the connection's lifetime.
+    kept = OrbitalElement(
+        norad_id=1, object_id="kept", object_name="kept", group="g", epoch=NOW, satrec=object()
+    )
+    pass_cache: dict[int, PassPrediction | None] = {
+        1: PassPrediction(rise_at=None, culmination_at=NOW, set_at=None, max_elevation_deg=10.0),
+        2: None,
+    }
+    pass_retry_at: dict[int, float] = {2: 60.0, 3: 120.0}
+
+    _prune_pass_cache(pass_cache, pass_retry_at, [kept])
+
+    assert set(pass_cache) == {1}
+    assert pass_retry_at == {}
+
+
+def test_fast_tier_attaches_pass_prediction_for_watchlisted_overhead_geo() -> None:
+    # End-to-end through celestrak_records: the watchlisted overhead GEO is GEO-always-above
+    # for this observer, so its prediction has no rise/set crossing in the search window.
+    records = asyncio.run(
+        _drive(
+            _records_agen(
+                _feeder(),
+                watchlist_source=lambda: {99001},
+                propagate_fast_s=1e9,
+                propagate_s=0.0,
+                watchlist_refresh_s=1e9,
+            ),
+            statuses_wanted=4,
+        )
+    )
+    overhead = next(
+        t for t in _tracks(records) if t.attributes["object_name"] == "AETHER-GEO-OVERHEAD"
+    )
+    attrs = overhead.attributes
+    assert "pass_culmination_at" in attrs
+    assert "pass_max_elevation_deg" in attrs
+    assert attrs["pass_max_elevation_deg"] > 10.0
+    assert "pass_rise_at" not in attrs
+    assert "pass_set_at" not in attrs
