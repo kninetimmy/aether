@@ -98,12 +98,17 @@ class _Firing:
     ``level`` is the last evaluated truth of the rule's conditions for this subject
     (drives edge detection). ``last_fired`` backs the cooldown. ``open_alert`` is the
     currently-open alert this firing produced, if any — held so an exit/remove edge
-    can auto-resolve it and so a still-open alert dedups repeat fires.
+    can auto-resolve it and so a still-open alert dedups repeat fires. ``last_record``
+    is the record that drove the most recent tick — held so ``_on_remove`` can build a
+    discrete alert for an ``exit``-transition rule whose level was True at removal (the
+    falling edge of such a rule never arrives as an upsert; removal is the only signal,
+    PRD §32 #19).
     """
 
     level: bool = False
     last_fired: datetime | None = None
     open_alert: AlertRecord | None = None
+    last_record: Record | None = None
 
 
 def subject_type_of(record: Record) -> str:
@@ -400,6 +405,7 @@ class AlertEngine:
         """
         key = (rule.id, rule.dedup_key if rule.dedup_key is not None else subject)
         firing = self._firings.setdefault(key, _Firing())
+        firing.last_record = record
         prev = firing.level
         current = level
         transition = rule.transition or "enter"
@@ -433,15 +439,22 @@ class AlertEngine:
         return []
 
     def _on_remove(self, kind: StateKind, removed_id: str, now: datetime) -> list[AlertRecord]:
-        """Auto-resolve open alerts for a removed track/feature and forget its memory.
+        """Resolve/fire on a removed track/feature's gone-subject edge; forget its memory.
 
         Tracks and geo-features are the continuous subjects that get removed (track
-        expiry/handoff, PRD §15.4; a feature aging out of its feed). For each rule, the
-        removed subject's level drops to False: an open enter-rule alert auto-resolves,
-        and a per-subject firing entry is forgotten so the firing map stays bounded
-        (PRD §37). A shared ``dedup_key`` entry is kept (other subjects may still hold
-        the group) but its level/open is cleared. Source-status/event/alert removals
-        never reach here as continuous subjects.
+        expiry/handoff, PRD §15.4; a feature aging out of its feed). For an ``enter``
+        rule with an open alert, the removed subject's level drops to False and the
+        open alert auto-resolves. For an ``exit`` rule, the *opposite* edge matters: its
+        True region is "above some floor" — which is exactly the band the source adapter
+        keeps emitting, so the falling (True→False) edge never arrives as an ordinary
+        upsert and is only ever observable as removal. So a removed subject whose exit
+        rule was last seen True fires ONE discrete alert here (cooldown-gated, no open/
+        resolve pairing — a point-in-time "the thing that was happening has now ended",
+        PRD §32 #19), built from the firing's stashed ``last_record`` since there is no
+        record on a remove. Either way, a per-subject firing entry is forgotten so the
+        firing map stays bounded (PRD §37); a shared ``dedup_key`` entry is kept (other
+        subjects may still hold the group) but its level is cleared. Source-status/
+        event/alert removals never reach here as continuous subjects.
         """
         if kind not in ("track", "feature"):
             return []
@@ -451,9 +464,20 @@ class AlertEngine:
             firing = self._firings.get(key)
             if firing is None:
                 continue
-            if firing.open_alert is not None and (rule.transition or "enter") == "enter":
+            transition = rule.transition or "enter"
+            if firing.open_alert is not None and transition == "enter":
                 out.append(self._resolve(firing.open_alert, now))
                 firing.open_alert = None
+            else:
+                last = firing.last_record
+                if (
+                    transition == "exit"
+                    and firing.level is True
+                    and last is not None
+                    and self._can_fire_discrete(firing, rule, now)
+                ):
+                    out.append(self._open_alert(rule, removed_id, last, now))
+                    firing.last_fired = now
             if rule.dedup_key is None:
                 self._firings.pop(key, None)
             else:

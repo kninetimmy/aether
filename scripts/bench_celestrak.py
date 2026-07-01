@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import resource
 import sys
 import time
 import urllib.parse
@@ -37,6 +36,19 @@ from typing import Any
 
 GP_URL = "https://celestrak.org/NORAD/elements/gp.php?GROUP={group}&FORMAT=json"
 SLOW_BUDGET_S = 15.0  # mirrors aether.config.DEFAULT_CELESTRAK_PROPAGATE_S (the slow tier)
+FAST_BUDGET_S = 2.0  # mirrors aether.config.DEFAULT_CELESTRAK_PROPAGATE_FAST_S (M6.8)
+
+
+def _peak_rss_mb() -> float | None:
+    """Process peak RSS in MB, or ``None`` where the POSIX-only ``resource`` module isn't
+    available (e.g. Windows dev machines). RSS is a secondary diagnostic here — SGP4 memory
+    use is already known to be far below the 1024 MB gate — so its absence degrades the
+    printed report, never the benchmark itself (honest degradation, PRD §37)."""
+    try:
+        import resource
+    except ImportError:
+        return None
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024  # KB→MB on Linux
 
 
 def _get(url: str, timeout_s: float = 30.0) -> bytes:
@@ -45,6 +57,66 @@ def _get(url: str, timeout_s: float = 30.0) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": "aether-celestrak-bench/1.0"})
     with urllib.request.urlopen(req, timeout=timeout_s) as resp:  # noqa: S310 (https public)
         return bytes(resp.read())
+
+
+def _bench_pass_predict(elements: list[Any], args: argparse.Namespace) -> int:
+    """Time one M6.8 pass-prediction recompute for an ISS-class object (PRD §32 #18/#19).
+
+    Picks NORAD 25544 (ISS) out of the already-built element set (falling back to the first
+    element if 25544 is absent — e.g. a group that does not include ISS), then times
+    ``predict_next_pass`` over ``--iters`` calls and reports the mean wall time and margin
+    against the **2 s fast-tier** propagate budget (the budget this recompute must fit inside
+    if it stays inline on the event loop — see ``docs/orbital-celestrak.md``).
+    """
+    from aether.orbital.pass_prediction import predict_next_pass
+
+    target = next((e for e in elements if e.norad_id == 25544), elements[0])
+    print(f"# pass-prediction bench: NORAD {target.norad_id} ({target.object_name})")
+    print(f"# iters={args.iters}  min_elevation={args.min_elevation}\n")
+
+    widths = (("iter", 4), ("predict_s", 11), ("result", 18))
+    hdr = "  ".join(f"{name:>{w}}" for name, w in widths)
+    print(hdr)
+    print("-" * len(hdr))
+
+    times: list[float] = []
+    for i in range(args.iters):
+        start = datetime.now(UTC)
+        t0 = time.monotonic()
+        pred = predict_next_pass(
+            target.satrec,
+            start,
+            observer_lat_deg=args.lat,
+            observer_lon_deg=args.lon,
+            observer_alt_m=args.alt_m,
+            min_elevation_deg=args.min_elevation,
+        )
+        dt = time.monotonic() - t0
+        times.append(dt)
+        result = "pass found" if pred is not None else "no pass in window"
+        print(f"{i:>4}  {dt:>11.3f}  {result:>18}")
+
+    mean_t = sum(times) / len(times) if times else 0.0
+    margin = FAST_BUDGET_S / mean_t if mean_t else float("inf")
+
+    print("\n# ---- summary (mean) ----")
+    print(f"recompute/call   : {mean_t:8.3f} s   (budget {FAST_BUDGET_S:.0f}s/fast tick)")
+    print(
+        f"\n# real-time margin: {margin:.1f}x  ({FAST_BUDGET_S:.0f}s cadence / {mean_t:.3f}s work)"
+    )
+    print(
+        "# NOTE: this script cannot detect Pi-5 hardware — label this result by the machine it "
+        "actually ran on (e.g. '(dev machine, not Pi-5)') in docs/orbital-celestrak.md; never "
+        "report a non-Pi-5 run as a Pi-5 number."
+    )
+    if margin >= 4.0:
+        print("# VERDICT: ACCEPTABLE — comfortable margin to stay inline on the event loop.")
+        return 0
+    if margin >= 1.5:
+        print("# VERDICT: MARGINAL — keeps up but with limited headroom; consider to_thread.")
+        return 0
+    print("# VERDICT: NOT VIABLE inline — wrap predict_next_pass in asyncio.to_thread.")
+    return 1
 
 
 def main() -> int:
@@ -56,6 +128,12 @@ def main() -> int:
     ap.add_argument("--alt-m", type=float, default=0.0, help="observer altitude (m, WGS-84)")
     ap.add_argument("--min-elevation", type=float, default=10.0, help="horizon floor (deg)")
     ap.add_argument("--timeout", type=float, default=30.0, help="HTTP timeout (s)")
+    ap.add_argument(
+        "--pass-predict",
+        action="store_true",
+        help="time one pass-prediction recompute for an ISS-class object (M6.8) instead of "
+        "the slow-tier catalog-propagate benchmark",
+    )
     args = ap.parse_args()
 
     try:
@@ -85,14 +163,15 @@ def main() -> int:
     b0 = time.monotonic()
     elements, skipped = build_satrecs(rows, group=args.group)
     build_s = time.monotonic() - b0
-    build_rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024  # KB→MB on Linux
-    print(
-        f"# built {len(elements)} satrecs ({skipped} skipped) in {build_s:.2f}s, "
-        f"RSS {build_rss_mb:.0f} MB\n"
-    )
+    build_rss_mb = _peak_rss_mb()
+    rss_note = f"RSS {build_rss_mb:.0f} MB" if build_rss_mb is not None else "RSS n/a (non-POSIX)"
+    print(f"# built {len(elements)} satrecs ({skipped} skipped) in {build_s:.2f}s, {rss_note}\n")
     if not elements:
         print("No usable elements built — cannot benchmark propagation.")
         return 1
+
+    if args.pass_predict:
+        return _bench_pass_predict(elements, args)
 
     widths = (("iter", 4), ("propagate_s", 11), ("above", 6))
     hdr = "  ".join(f"{name:>{w}}" for name, w in widths)
@@ -128,7 +207,7 @@ def main() -> int:
     def mean(xs: list[float]) -> float:
         return sum(xs) / len(xs) if xs else 0.0
 
-    peak_rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024  # KB→MB on Linux
+    peak_rss_mb = _peak_rss_mb()
     mean_prop = mean(prop_t)
 
     print("\n# ---- summary (means) ----")
@@ -136,7 +215,10 @@ def main() -> int:
     print(f"build (satrecs)  : {build_s:8.3f} s   (one-time per sync, every 6 h)")
     print(f"propagate/tick   : {mean_prop:8.3f} s   (budget {SLOW_BUDGET_S:.0f}s/slow tick)")
     print(f"above/tick       : {mean([float(x) for x in above_all]):8.0f}")
-    print(f"peak RSS         : {peak_rss_mb:8.0f} MB  (process incl. sgp4)")
+    if peak_rss_mb is not None:
+        print(f"peak RSS         : {peak_rss_mb:8.0f} MB  (process incl. sgp4)")
+    else:
+        print("peak RSS         :      n/a  (resource module unavailable — non-POSIX)")
 
     margin = SLOW_BUDGET_S / mean_prop if mean_prop else float("inf")
     print(
@@ -144,7 +226,7 @@ def main() -> int:
         f"({SLOW_BUDGET_S:.0f}s cadence / {mean_prop:.2f}s work)   "
         "# SGP4 RSS is far below 1024 MB, so the margin is the real gate."
     )
-    if margin >= 4.0 and peak_rss_mb < 1024:
+    if margin >= 4.0 and (peak_rss_mb is None or peak_rss_mb < 1024):
         print("# VERDICT: ACCEPTABLE — comfortable real-time margin and bounded memory.")
         return 0
     if margin >= 1.5:

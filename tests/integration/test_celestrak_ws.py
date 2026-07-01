@@ -174,3 +174,10 @@ def test_watchlisted_object_propagates_on_fast_tier_end_to_end(
         attrs = orbital["attributes"]
         assert attrs["attribution"].startswith("Orbital data: CelesTrak")
         assert "not for navigation" in attrs["caveat"].lower()
+        # M6.8 (PRD §32 #18/#19): the fast tier attaches a cached pass prediction. The watchlisted
+        # overhead GEO is reliably above the horizon for this observer (GEO-always-above), so its
+        # prediction has a culmination/max-elevation but no rise/set crossing in the search window.
+        assert isinstance(attrs["pass_culmination_at"], str)
+        assert isinstance(attrs["pass_max_elevation_deg"], (int, float))
+        assert "pass_rise_at" not in attrs
+        assert "pass_set_at" not in attrs

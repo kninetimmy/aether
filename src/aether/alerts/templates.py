@@ -282,6 +282,75 @@ _TEMPLATES: tuple[tuple[str, AlertRuleCreate], ...] = (
             ),
         ),
     ),
+    # -- M6 orbital alerts (watched satellite culmination, PRD §12/§32 #18) ----------
+    # Culmination is mid-pass and well above the display floor, so its rising edge lands
+    # on an ordinary emitted fast-tier tick (like #17's rise edge): a plain ``enter`` rule,
+    # no engine change. ``culmination_reached`` is True once the clock reaches the SGP4-
+    # PREDICTED max-elevation instant the adapter stamps in attributes.pass_culmination_at;
+    # the open alert auto-resolves when the satellite sets out of live state. The watchlist
+    # leaf scopes it to orbital:celestrak:<norad>; empty watchlist ⇒ visibly inert.
+    (
+        "rule-satellite-culmination",
+        AlertRuleCreate(
+            name="Watched satellite culmination",
+            severity="info",
+            subject_types=["orbital_object"],
+            conditions=[
+                AlertCondition(
+                    field="attributes.pass_culmination_at", operator="culmination_reached"
+                ),
+                AlertCondition(field="watchlist", operator="watchlist"),
+            ],
+            enabled=False,
+            transition="enter",
+            channels=["dashboard", "browser"],
+            description=(
+                "A satellite on your watchlist has reached its maximum elevation "
+                "(culmination) over the home station — the highest point of this pass. The "
+                "culmination time is SGP4-PREDICTED from the latest CelesTrak element sets "
+                "(accuracy degrades with element age), not observed, and is not a precise "
+                "antenna look-angle. Fires once at predicted culmination and auto-resolves "
+                "when the satellite sets out of live state. Requires a configured station "
+                "position and the satellite on your watchlist (orbital:celestrak:<norad>). "
+                "Not authoritative for any operational use (PRD §32 #18)."
+            ),
+        ),
+    ),
+    # -- M6 orbital alerts (watched satellite pass end, PRD §12/§32 #19) --------------
+    # Same conditions as the rise rule (#17) but transition="exit". The set tick is filtered
+    # below the display floor by the adapter, so the falling edge never arrives as an upsert;
+    # the engine fires this on the track's removal from live state (~valid_s, about 30 s after
+    # the actual floor-crossing) as a single point-in-time alert. The ~30 s latency is inherent
+    # and called out in the description. Watchlist-scoped; AOI/floor-bounded; disabled by default.
+    (
+        "rule-satellite-pass-end",
+        AlertRuleCreate(
+            name="Watched satellite pass end",
+            severity="info",
+            subject_types=["orbital_object"],
+            conditions=[
+                AlertCondition(
+                    field="attributes.elevation_deg", operator="greater_than", value=10.0
+                ),
+                AlertCondition(field="watchlist", operator="watchlist"),
+            ],
+            enabled=False,
+            transition="exit",
+            channels=["dashboard", "browser"],
+            description=(
+                "A satellite on your watchlist has set below 10 deg elevation as seen from "
+                "the home station — the pass has ended. Because the predicted position is "
+                "dropped from the map the instant it falls below the display elevation floor, "
+                "this fires when the track ages out of live state (~valid_s, about 30 s after "
+                "the actual floor-crossing), not at the exact set instant; treat the timing as "
+                "approximate. Position and elevation are SGP4-PREDICTED from the latest "
+                "CelesTrak element sets (accuracy degrades with element age), not observed. "
+                "Requires a configured station position and the satellite on your watchlist "
+                "(orbital:celestrak:<norad>). Not authoritative for any operational use "
+                "(PRD §32 #19)."
+            ),
+        ),
+    ),
 )
 
 

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   aprsPacketKind,
   featurePresentation,
@@ -248,6 +248,57 @@ describe("trackDetails", () => {
     const keys = Object.keys(fieldMap(baseTrack({ track_type: "aircraft" })));
     expect(keys).not.toContain("Altitude");
     expect(keys).not.toContain("Position");
+  });
+
+  describe("orbital pass prediction (PRD §32 #18/#19)", () => {
+    const FROZEN_NOW = new Date("2026-06-15T12:00:00Z");
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(FROZEN_NOW);
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("renders rise (past)/culmination/set (future) as signed-relative strings", () => {
+      const riseAt = new Date(FROZEN_NOW.getTime() - 5 * 60_000); // 5 min ago
+      const culminationAt = new Date(FROZEN_NOW.getTime() + 2 * 60_000); // in 2 min
+      const setAt = new Date(FROZEN_NOW.getTime() + 9 * 60_000); // in 9 min
+      const t = baseTrack({
+        track_type: "orbital_object",
+        attributes: {
+          norad_id: 25544,
+          elevation_deg: 12.0,
+          pass_rise_at: riseAt.toISOString(),
+          pass_culmination_at: culminationAt.toISOString(),
+          pass_max_elevation_deg: 67.3,
+          pass_set_at: setAt.toISOString(),
+        },
+      });
+      const groups = trackDetails(t);
+      const passGroup = groups.find((g) => g.heading === "Pass (predicted)");
+      expect(passGroup).toBeTruthy();
+      const f: Record<string, string> = {};
+      for (const field of passGroup!.fields) f[field.label] = field.value;
+      expect(f["Rise"]).toContain("ago"); // in the past
+      expect(f["Culmination"]).toMatch(/^in /); // in the future
+      expect(f["Culmination"]).toContain("max");
+      expect(f["Culmination"]).toContain("°");
+      expect(f["Set"]).toMatch(/^in /); // in the future
+    });
+
+    it("renders no Pass group when no pass_* attributes are present (GEO/no-pass)", () => {
+      const t = baseTrack({
+        track_type: "orbital_object",
+        attributes: { norad_id: 99002, elevation_deg: 4.0 },
+      });
+      const groups = trackDetails(t);
+      expect(groups.some((g) => g.heading === "Pass (predicted)")).toBe(false);
+      // Existing groups are unaffected by the absence of pass data.
+      expect(groups.some((g) => g.heading === "Satellite")).toBe(true);
+    });
   });
 });
 
