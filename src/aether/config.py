@@ -389,6 +389,36 @@ DEFAULT_STATION_LON = 0.0
 DEFAULT_STATION_RADIUS_NM = 500.0
 
 
+#: --- Browser-security hardening (M7.1, PRD §26.2) ---
+#: Hostnames trusted unconditionally: the loopback bind the app always serves on
+#: (dev, the test suite, and the private default all use these). The operator adds
+#: their Tailscale MagicDNS name via ``AETHER_ALLOWED_HOSTS`` to reach the COP over
+#: Tailscale Serve. Host/Origin are matched by hostname only (port- and
+#: scheme-insensitive), like Django's ``ALLOWED_HOSTS``.
+LOOPBACK_HOSTS: tuple[str, ...] = ("localhost", "127.0.0.1", "::1")
+#: Content-Security-Policy compatible with MapLibre GL + the hosted CARTO dark
+#: basemap (see the hosted-basemap decision). ``worker-src``/``child-src blob:`` —
+#: MapLibre spawns its render worker from a Blob URL; ``connect-src https: wss:`` —
+#: the tile fetches plus the same-origin websocket; ``img-src data: blob:`` —
+#: sprites and the WebGL canvas; ``style-src 'unsafe-inline'`` — MapLibre injects
+#: element styles. **No** ``'unsafe-eval'`` (PRD §26.2 "do not use ``eval``"). Override
+#: via ``AETHER_CSP``; an empty value omits the header (e.g. to debug a policy
+#: violation against the live map without a rebuild).
+DEFAULT_CONTENT_SECURITY_POLICY = (
+    "default-src 'self'; "
+    "script-src 'self'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: blob: https:; "
+    "connect-src 'self' https: wss:; "
+    "worker-src blob:; "
+    "child-src blob:; "
+    "font-src 'self' data:; "
+    "object-src 'none'; "
+    "base-uri 'self'; "
+    "frame-ancestors 'self'"
+)
+
+
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None:
@@ -659,6 +689,21 @@ class Settings:
     email_from: str = ""
     email_to: str = ""
     discord_webhook_url: str = field(default="", repr=False)
+
+    #: Browser-security hardening (M7.1, PRD §26.2). When enabled, the ASGI security
+    #: middleware validates Host + Origin on ``/api/*`` AND ``/ws/v2`` and stamps CSP +
+    #: hardening headers onto every HTTP response. Loopback is always trusted; add your
+    #: Tailscale MagicDNS name to ``allowed_hosts`` to reach the COP over Serve.
+    #: **The field default is False so the many unit tests that build ``Settings(...)``
+    #: directly are unaffected; :meth:`from_env` (the real deployment path) defaults it
+    #: True — production is hardened, tests opt in explicitly.**
+    security_enabled: bool = False
+    #: Extra trusted hostnames beyond loopback (e.g. ``pi.tailnet-name.ts.net``).
+    #: Matched against both the Host header and the Origin header's hostname,
+    #: port- and scheme-insensitive.
+    allowed_hosts: tuple[str, ...] = ()
+    #: Content-Security-Policy header value; empty ⇒ header omitted (PRD §26.2).
+    content_security_policy: str = DEFAULT_CONTENT_SECURITY_POLICY
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -961,4 +1006,13 @@ class Settings:
             email_from=os.environ.get("AETHER_EMAIL_FROM", ""),
             email_to=os.environ.get("AETHER_EMAIL_TO", ""),
             discord_webhook_url=os.environ.get("AETHER_DISCORD_WEBHOOK_URL", ""),
+            # Hardened by default on the real deployment path (unlike the field default,
+            # which stays False so direct-construction unit tests are unaffected).
+            security_enabled=_env_bool("AETHER_SECURITY_ENABLED", True),
+            allowed_hosts=tuple(
+                h.strip().lower()
+                for h in os.environ.get("AETHER_ALLOWED_HOSTS", "").split(",")
+                if h.strip()
+            ),
+            content_security_policy=os.environ.get("AETHER_CSP", DEFAULT_CONTENT_SECURITY_POLICY),
         )
