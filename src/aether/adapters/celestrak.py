@@ -101,6 +101,14 @@ MAX_BACKOFF_S = 60.0
 #: in the search window (M6.8, PRD §32 #18/#19).
 PASS_PREDICT_RETRY_S = 60.0
 
+#: A cached pass with ``set_at is None`` (never sets within the search window — most notably a
+#: geostationary/always-above object) has no natural re-arm point like the real-floor-crossing
+#: gate below. Force a periodic recompute once ``wall`` has advanced this far past the cached
+#: ``culmination_at`` so such a prediction does not serve an ever-more-stale culmination time
+#: forever (Gemini Code Assist review, PR #54). Matches the GP sync cadence (``sync_s`` default
+#: 21600.0 = 6h) — no value in refreshing a pass prediction faster than the elements themselves.
+PASS_GEO_RECOMPUTE_INTERVAL = timedelta(hours=6)
+
 #: Provider-name aliases selecting the in-process no-hardware feeder.
 _FAKE_PROVIDER_NAMES = frozenset({"fake", "demo"})
 
@@ -479,19 +487,24 @@ def _update_pass_cache(
     ``pass_cache``/``pass_retry_at`` are mutated in place (NORAD-keyed, loop-scope state owned
     by :func:`celestrak_records`). An object "needs recompute" when (a) it has never been
     predicted yet, (b) its cached prediction is ``None`` (decayed object, or genuinely no pass
-    in the search window) and the retry backoff (:data:`PASS_PREDICT_RETRY_S`) has elapsed, or
+    in the search window) and the retry backoff (:data:`PASS_PREDICT_RETRY_S`) has elapsed,
     (c) its cached pass has a ``set_at`` AND ``wall`` is past it AND the object's CURRENT
     elevation has actually dropped below ``min_elevation_deg`` — gating on the real floor
     crossing (one extra ``propagate`` call, already cheap per-tick) rather than purely on the
     predicted ``set_at`` closes the race where an optimistic-by-a-few-seconds prediction would
-    silently swap in next-pass data while the object is still above the floor mid-pass.
+    silently swap in next-pass data while the object is still above the floor mid-pass — or (d)
+    its cached pass has ``set_at is None`` (never sets within the search window — most notably a
+    geostationary/always-above object) AND ``wall`` has advanced past ``culmination_at +
+    PASS_GEO_RECOMPUTE_INTERVAL``. (d) exists because such an object has no natural re-arm point
+    like (c)'s floor crossing — without it, a cached geostationary prediction would serve an
+    ever-more-stale ``culmination_at`` forever.
 
     Only ONE element is actually recomputed (the ~24h scan) per tick — amortized so a resync
     that invalidates every cache entry at once never recomputes the whole watchlist in the same
-    tick (it ramps up over a few ticks instead). (a) and (c) are treated as URGENT and win the
-    slot immediately, in list order; (b) is a lower-priority fallback, only taken when nothing
-    urgent needs the slot this tick. Without this priority split, a watchlist heavy in objects
-    that genuinely never pass (cached ``None``, endlessly retried every
+    tick (it ramps up over a few ticks instead). (a), (c), and (d) are treated as URGENT and win
+    the slot immediately, in list order; (b) is a lower-priority fallback, only taken when
+    nothing urgent needs the slot this tick. Without this priority split, a watchlist heavy in
+    objects that genuinely never pass (cached ``None``, endlessly retried every
     :data:`PASS_PREDICT_RETRY_S`) could starve a real object's (c) recompute out of the single
     per-tick slot for its whole below-floor inter-pass gap — by the time the object rises again
     for its next pass, (c)'s own gate (``cur_elev < floor``) can no longer fire, so the cache
@@ -539,6 +552,23 @@ def _update_pass_cache(
                     min_elevation_deg=min_elevation_deg,
                 )
                 return
+        elif (
+            cached is not None
+            and cached.set_at is None
+            and wall >= cached.culmination_at + PASS_GEO_RECOMPUTE_INTERVAL
+        ):
+            _recompute_pass(
+                element,
+                pass_cache,
+                pass_retry_at,
+                observer_lat=observer_lat,
+                observer_lon=observer_lon,
+                observer_alt_m=observer_alt_m,
+                wall=wall,
+                loop_time=loop_time,
+                min_elevation_deg=min_elevation_deg,
+            )
+            return
         elif (
             cached is None and retry_candidate is None and loop_time >= pass_retry_at.get(nid, 0.0)
         ):
