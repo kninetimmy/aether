@@ -713,6 +713,85 @@ def test_update_pass_cache_recompute_gated_on_actual_floor_crossing(
     assert len(calls) == 1  # no recompute — still above the floor in reality
 
 
+def test_update_pass_cache_recomputes_geo_object_past_recompute_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A geostationary/always-above object never crosses the floor, so it has no `set_at` and
+    # never hits the (c) actual-floor-crossing gate above. Without a periodic re-arm, its
+    # `pass_culmination_at` would drift further into the past forever (Gemini Code Assist
+    # review, PR #54).
+    from aether.adapters import celestrak as mod
+
+    geo = OrbitalElement(
+        norad_id=99,
+        object_id="geo",
+        object_name="geo-sat",
+        group="g",
+        epoch=NOW,
+        satrec=object(),
+    )
+    calls: list[int] = []
+
+    def _never_sets(satrec: Any, start: datetime, **_: Any) -> PassPrediction:
+        calls.append(1)
+        return PassPrediction(
+            rise_at=None, culmination_at=start, set_at=None, max_elevation_deg=80.0
+        )
+
+    def _unexpected_propagate(satrec: Any, when: datetime, **kwargs: Any) -> Any:
+        raise AssertionError("a never-sets object must not hit the actual-floor-crossing gate")
+
+    monkeypatch.setattr(mod, "predict_next_pass", _never_sets)
+    monkeypatch.setattr(mod, "propagate", _unexpected_propagate)
+
+    pass_cache: dict[int, PassPrediction | None] = {}
+    pass_retry_at: dict[int, float] = {}
+
+    # Never cached -> forced recompute (call #1).
+    _update_pass_cache(
+        [geo],
+        pass_cache,
+        pass_retry_at,
+        observer_lat=OBS_LAT,
+        observer_lon=OBS_LON,
+        observer_alt_m=0.0,
+        wall=NOW,
+        loop_time=0.0,
+        min_elevation_deg=10.0,
+    )
+    assert len(calls) == 1
+    cached = pass_cache[geo.norad_id]
+    assert cached is not None and cached.set_at is None
+
+    # Just short of the recompute interval -> the cache is stale but not stale enough yet.
+    _update_pass_cache(
+        [geo],
+        pass_cache,
+        pass_retry_at,
+        observer_lat=OBS_LAT,
+        observer_lon=OBS_LON,
+        observer_alt_m=0.0,
+        wall=NOW + mod.PASS_GEO_RECOMPUTE_INTERVAL - timedelta(seconds=1),
+        loop_time=1.0,
+        min_elevation_deg=10.0,
+    )
+    assert len(calls) == 1  # still just the one call
+
+    # Interval elapsed -> recompute fires even though the object never "set".
+    _update_pass_cache(
+        [geo],
+        pass_cache,
+        pass_retry_at,
+        observer_lat=OBS_LAT,
+        observer_lon=OBS_LON,
+        observer_alt_m=0.0,
+        wall=NOW + mod.PASS_GEO_RECOMPUTE_INTERVAL,
+        loop_time=2.0,
+        min_elevation_deg=10.0,
+    )
+    assert len(calls) == 2
+
+
 def test_update_pass_cache_urgent_recompute_not_starved_by_none_retry_backlog(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
