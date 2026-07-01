@@ -56,6 +56,7 @@ ConditionOperator = Literal[
     "exited_geofence",
     "geofence_intersects",
     "became_active",
+    "culmination_reached",
     "source_stale",
     "source_offline",
     "count_within_window",

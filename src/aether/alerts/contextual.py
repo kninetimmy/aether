@@ -21,7 +21,7 @@ import logging
 from collections import OrderedDict, deque
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from aether.alerts import geo
@@ -258,6 +258,9 @@ class ContextualEvaluator:
                 elif op == "became_active":
                     ok, ev = self._eval_became_active(record, now)
                     evaluable = evaluable and ev
+                elif op == "culmination_reached":
+                    ok, ev = self._eval_culmination_reached(cond, dump, now)
+                    evaluable = evaluable and ev
                 else:  # geometry leaves
                     ok, ev = self._eval_geometry(op, cond, rule, record)
                     evaluable = evaluable and ev
@@ -421,6 +424,29 @@ class ContextualEvaluator:
         if not isinstance(record, GeoFeatureRecord) or record.valid_from is None:
             return False, False
         return record.valid_from <= now, True
+
+    def _eval_culmination_reached(
+        self, cond: AlertCondition, dump: dict[str, Any], now: datetime
+    ) -> tuple[bool, bool]:
+        """Temporal level for ``culmination_reached``: has ``now`` reached the predicted
+        pass-culmination instant? Reads ``cond.field`` (``attributes.pass_culmination_at``,
+        an ISO-UTC string set by the CelesTrak adapter) and compares it to ``now``. The
+        level goes True on the rising edge as ``now`` crosses culmination — that edge fires
+        under the ``enter`` transition on an ordinary fast-tier tick (mid-pass, above the
+        floor), and the open alert auto-resolves when the satellite sets out of live state
+        (``_on_remove`` enter branch). Unevaluable when the attribute is absent (no pass
+        predicted — a GEO/no-pass object) or unparseable — an honest unknown, never a
+        confident 'not yet' (PRD §37)."""
+        raw = resolve_field(dump, cond.field)
+        if not isinstance(raw, str):
+            return False, False
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return False, False
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return now >= parsed, True
 
     def _eval_distance(
         self, op: str, cond: AlertCondition, rule: AlertRule, lon: float, lat: float

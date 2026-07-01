@@ -88,6 +88,7 @@ def _aircraft(
     classification: Classification | None = None,
     track_type: str = "aircraft",
     id: str = "aircraft:icao:abc",
+    label: str | None = None,
 ) -> TrackRecord:
     return TrackRecord(
         id=id,
@@ -99,6 +100,7 @@ def _aircraft(
         track_type=track_type,  # type: ignore[arg-type]
         locally_received=locally_received,
         classification=classification,
+        label=label,
         attributes={"squawk": squawk} if squawk is not None else {},
     )
 
@@ -251,6 +253,97 @@ def test_exit_fires_when_condition_stops_holding() -> None:
     assert engine.evaluate(_change(_aircraft(squawk="7700"))) == []  # enter ≠ exit
     out = engine.evaluate(_change(_aircraft(squawk=None)))
     assert len(out) == 1 and out[0].state == "open"
+
+
+# --- exit-transition discrete fire on removal (PRD §32 #19) -----------------
+#
+# An ``exit`` rule whose True region is "above some floor" never sees a falling-edge
+# upsert when the source adapter itself stops emitting below that floor (the
+# CelesTrak display-elevation floor for satellite passes) — the only observable
+# signal is the track's removal from live state. _on_remove fires ONE discrete
+# alert for such a rule, built from the firing's stashed ``last_record``.
+
+
+def test_exit_rule_fires_once_on_removal_when_level_was_true() -> None:
+    clock = _Clock(T0)
+    engine = _engine(clock, [_rule(transition="exit")])
+    # Level holds True (squawk == 7700); the existing exit semantics produce no
+    # upsert-fire here (that edge is "condition cleared", not "condition began").
+    assert engine.evaluate(_change(_aircraft(squawk="7700"))) == []
+    out = engine.evaluate(StateChange(1, "remove", "track", "aircraft:icao:abc", None))
+    assert len(out) == 1
+    assert out[0].state == "open"  # a point-in-time discrete alert, not an open/resolve pair
+
+
+def test_exit_rule_does_not_fire_on_removal_when_level_was_false() -> None:
+    clock = _Clock(T0)
+    engine = _engine(clock, [_rule(transition="exit")])
+    assert engine.evaluate(_change(_aircraft(squawk=None))) == []  # never rose above threshold
+    out = engine.evaluate(StateChange(1, "remove", "track", "aircraft:icao:abc", None))
+    assert out == []
+
+
+def test_exit_rule_fires_fresh_on_each_successive_pass_no_cooldown_carryover() -> None:
+    clock = _Clock(T0)
+    engine = _engine(clock, [_rule(transition="exit", cooldown_s=600.0)])
+
+    assert engine.evaluate(_change(_aircraft(squawk="7700"))) == []
+    out1 = engine.evaluate(StateChange(1, "remove", "track", "aircraft:icao:abc", None))
+    assert len(out1) == 1
+
+    # Only 1s later — well inside the 600s cooldown if it bled across passes. The
+    # firing entry was popped after the first fire (default dedup_key), so a fresh
+    # pass starts with no memory and fires again.
+    clock.t = T0 + timedelta(seconds=1)
+    assert engine.evaluate(_change(_aircraft(squawk="7700"))) == []
+    out2 = engine.evaluate(StateChange(1, "remove", "track", "aircraft:icao:abc", None))
+    assert len(out2) == 1
+
+
+def test_exit_rule_removal_alert_uses_stashed_record_for_label() -> None:
+    clock = _Clock(T0)
+    engine = _engine(clock, [_rule(transition="exit")])
+    record = _aircraft(squawk="7700", id="aircraft:icao:label-test", label="N12345")
+    assert engine.evaluate(_change(record)) == []
+    out = engine.evaluate(StateChange(1, "remove", "track", "aircraft:icao:label-test", None))
+    assert len(out) == 1
+    assert out[0].subject_id == "aircraft:icao:label-test"
+    assert "N12345" in out[0].summary
+
+
+def test_exit_rule_end_to_end_satellite_pass_end_via_contextual_path() -> None:
+    # Wires the real #19 shape: a contextual exit rule (elevation_deg > 10 AND
+    # watchlist) over an orbital_object track. The upsert drives the rule True (no
+    # fire — that's the "cleared" edge); the removal fires the discrete pass-end alert.
+    clock = _Clock(T0)
+    rule = _rule(
+        subject_types=["orbital_object"],
+        conditions=[
+            AlertCondition(field="attributes.elevation_deg", operator="greater_than", value=10.0),
+            AlertCondition(field="watchlist", operator="watchlist"),
+        ],
+        transition="exit",
+    )
+    engine = _engine(clock, [rule])
+    engine.set_watchlist({"orbital:celestrak:25544"})
+    sat = TrackRecord(
+        id="orbital:celestrak:25544",
+        source="celestrak",
+        observed_at=T0,
+        received_at=T0,
+        published_at=T0,
+        correlation_key="orbital:celestrak:25544",
+        track_type="orbital_object",
+        geometry=Point(coordinates=[-95.0, 40.0]),
+        altitude_m=420_000.0,
+        locally_received=False,
+        predicted=True,
+        attributes={"elevation_deg": 45.0, "norad_id": 25544},
+    )
+    assert engine.evaluate(_change(sat)) == []
+    out = engine.evaluate(StateChange(1, "remove", "track", "orbital:celestrak:25544", None))
+    assert len(out) == 1
+    assert out[0].state == "open"
 
 
 def test_change_fires_on_every_flip() -> None:

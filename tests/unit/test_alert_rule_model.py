@@ -137,6 +137,8 @@ def test_value_free_operators_need_no_comparand() -> None:
     AlertCondition(field="attributes.squawk", operator="exists")
     AlertCondition(field="status", operator="source_offline")
     AlertCondition(field="geometry", operator="entered_geofence")
+    # culmination_reached (M6.8 #18) is value-free like became_active.
+    AlertCondition(field="attributes.pass_culmination_at", operator="culmination_reached")
 
 
 def test_window_s_must_be_positive() -> None:

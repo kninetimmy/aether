@@ -384,6 +384,122 @@ def test_became_active_unevaluable_for_track() -> None:
     assert engine.evaluate(_change(_track(STATION_LON, STATION_LAT))) == []
 
 
+# --- satellite pass culmination (culmination_reached, PRD §32 #18) -----------
+
+
+def _orbital_with_culmination(
+    culmination_at: datetime | str | None, *, norad: int = 25544, id: str | None = None
+) -> TrackRecord:
+    """A minimal SGP4-PREDICTED orbital_object track carrying (or omitting)
+    ``attributes.pass_culmination_at`` — mirrors the CelesTrak adapter's attribute
+    convention (an ISO-UTC string, omitted entirely when no pass is predicted)."""
+    rid = id or f"orbital:celestrak:{norad}"
+    attrs: dict[str, Any] = {"norad_id": norad}
+    if culmination_at is not None:
+        attrs["pass_culmination_at"] = (
+            culmination_at.isoformat() if isinstance(culmination_at, datetime) else culmination_at
+        )
+    return TrackRecord(
+        id=rid,
+        source="celestrak",
+        observed_at=T0,
+        received_at=T0,
+        published_at=T0,
+        correlation_key=rid,
+        track_type="orbital_object",
+        geometry=Point(coordinates=[-95.0, 40.0]),
+        altitude_m=420_000.0,
+        locally_received=False,
+        predicted=True,
+        attributes=attrs,
+    )
+
+
+def _culmination_rule(**kw: Any) -> AlertRule:
+    # Same condition shape as the shipped rule-satellite-culmination template (#18).
+    return _rule(
+        subject_types=["orbital_object"],
+        conditions=[
+            AlertCondition(field="attributes.pass_culmination_at", operator="culmination_reached"),
+        ],
+        transition="enter",
+        **kw,
+    )
+
+
+def test_culmination_reached_fires_when_clock_crosses_culmination() -> None:
+    clock = _Clock(T0)
+    engine = _engine(clock, [_culmination_rule()])
+    culm_at = T0 + timedelta(minutes=5)
+    sat = _orbital_with_culmination(culm_at)
+
+    # Before culmination → level False, no fire (baseline established).
+    assert engine.evaluate(_change(sat)) == []
+
+    # The clock crosses the predicted culmination instant (attribute unchanged) →
+    # rising edge fires.
+    clock.t = culm_at
+    out = engine.evaluate(_change(sat))
+    assert len(out) == 1 and out[0].state == "open"
+
+    # Still at/after culmination → dedups against the still-open alert.
+    clock.t = culm_at + timedelta(seconds=1)
+    assert engine.evaluate(_change(sat)) == []
+
+
+def test_culmination_reached_auto_resolves_when_satellite_sets() -> None:
+    # Real-world set path: the satellite ages out of live state below the display
+    # floor → track removal → _on_remove auto-resolves the open enter-rule alert.
+    clock = _Clock(T0)
+    engine = _engine(clock, [_culmination_rule()])
+    sat = _orbital_with_culmination(T0)
+    out = engine.evaluate(_change(sat))
+    assert len(out) == 1 and out[0].state == "open"
+
+    clock.t = T0 + timedelta(minutes=5)
+    resolved = engine.evaluate(_change(sat, op="remove"))
+    assert len(resolved) == 1 and resolved[0].state == "resolved"
+
+
+def test_culmination_reached_unevaluable_without_attribute() -> None:
+    # No pass predicted (GEO/no-pass object) → the attribute is omitted entirely — an
+    # honest unknown, never a confident "not yet" (PRD §37).
+    clock = _Clock(T0)
+    engine = _engine(clock, [_culmination_rule()])
+    assert engine.evaluate(_change(_orbital_with_culmination(None))) == []
+
+
+def test_culmination_reached_unevaluable_when_unparseable() -> None:
+    clock = _Clock(T0)
+    engine = _engine(clock, [_culmination_rule()])
+    assert engine.evaluate(_change(_orbital_with_culmination("not-a-date"))) == []
+
+
+def test_culmination_reached_unevaluable_tick_does_not_pollute_open_alert() -> None:
+    # The two tests above only prove an unevaluable tick fires nothing from a FRESH firing —
+    # which is indistinguishable from an evaluated `level=False` tick and would not catch an
+    # operator that wrongly claimed `evaluable=True` for an absent/unparseable attribute (that
+    # mutation was confirmed to slip past both tests above during M6.8 review). This test
+    # instead establishes an OPEN alert first, then proves an unevaluable tick for the SAME
+    # subject is a total no-op: it must not auto-resolve the open alert, and a later evaluable
+    # tick with the ORIGINAL (still culminating) value must dedup against it rather than
+    # re-firing — proof the unevaluable tick never touched `firing.level`/`open_alert`.
+    # Mirrors the `count_within_window` unpolluted-state pattern above.
+    clock = _Clock(T0)
+    engine = _engine(clock, [_culmination_rule()])
+    sat = _orbital_with_culmination(T0)  # already past culmination at T0 → fires on first sight
+
+    out = engine.evaluate(_change(sat))
+    assert len(out) == 1 and out[0].state == "open"
+
+    unevaluable = _orbital_with_culmination(None, norad=25544)  # same subject id, attribute gone
+    assert engine.evaluate(_change(unevaluable)) == []  # must not resolve the open alert
+
+    # Re-observing the ORIGINAL still-culminating value dedups against the still-open alert —
+    # if the unevaluable tick had wrongly reset firing.level/open_alert, this would re-fire.
+    assert engine.evaluate(_change(sat)) == []
+
+
 # --- distance -----------------------------------------------------------------
 
 
